@@ -1,0 +1,869 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Tokenizador & Transformer — Como o ChatGPT lê texto</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg0: #08090b;
+    --bg1: #0f1218;
+    --bg2: #151a24;
+    --bg3: #1c2330;
+    --border: #242d3d;
+    --amber: #f5a623;
+    --amber2: #ffd27a;
+    --amber-dim: rgba(245,166,35,0.12);
+    --green: #2ecc71;
+    --red: #e74c3c;
+    --blue: #3498db;
+    --text: #ccd6f0;
+    --text-dim: #4a5d7a;
+    --mono: 'Share Tech Mono', 'Courier New', monospace;
+    --head: 'Rajdhani', sans-serif;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:var(--bg0); color:var(--text); font-family:var(--mono); font-size:13px; min-height:100vh; overflow-x:hidden; }
+
+  /* Scanline overlay */
+  body::before {
+    content:''; position:fixed; inset:0; pointer-events:none; z-index:999;
+    background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.03) 2px, rgba(0,0,0,0.03) 4px);
+  }
+
+  /* ── HEADER ── */
+  .header {
+    display:flex; align-items:center; justify-content:space-between;
+    padding:12px 16px; border-bottom:1px solid var(--border);
+    background: linear-gradient(90deg, var(--bg1) 0%, rgba(245,166,35,0.04) 100%);
+  }
+  .header-left { display:flex; flex-direction:column; gap:3px; }
+  .header-title { font-family:var(--head); font-size:17px; font-weight:700; color:var(--amber); letter-spacing:.2em; }
+  .header-sub { font-size:9px; color:var(--text-dim); letter-spacing:.12em; }
+  .header-badge { font-size:9px; color:var(--text-dim); border:1px solid var(--border); padding:3px 8px; border-radius:3px; }
+
+  /* ── CONTROLS ── */
+  .controls { padding:10px 16px; display:flex; align-items:center; gap:8px; flex-wrap:wrap; border-bottom:1px solid var(--border); background:var(--bg1); }
+  .ctrl-label { font-size:9px; color:var(--text-dim); letter-spacing:.1em; margin-right:4px; }
+
+  .btn {
+    font-family:var(--mono); font-size:10px; padding:4px 12px;
+    border:1px solid var(--border); background:transparent; color:var(--text-dim);
+    cursor:pointer; border-radius:3px; transition:all .15s; letter-spacing:.06em;
+  }
+  .btn:hover { border-color:var(--amber); color:var(--amber); background:var(--amber-dim); }
+  .btn.active { border-color:var(--amber); color:var(--amber); background:var(--amber-dim); }
+
+  .custom-input {
+    flex:1; min-width:200px; max-width:420px; font-family:var(--mono); font-size:11px;
+    background:var(--bg2); border:1px solid var(--border); color:var(--text);
+    padding:5px 10px; border-radius:3px; outline:none; transition:border-color .2s;
+    display:none;
+  }
+  .custom-input:focus { border-color:var(--amber); }
+  .custom-input.visible { display:block; }
+
+  .btn-run {
+    font-family:var(--mono); font-size:10px; padding:5px 14px;
+    border:1px solid var(--amber); background:var(--amber-dim); color:var(--amber);
+    cursor:pointer; border-radius:3px; letter-spacing:.08em; font-weight:bold;
+    display:none; transition:all .15s;
+  }
+  .btn-run:hover { background:rgba(245,166,35,0.25); }
+  .btn-run.visible { display:block; }
+
+  .divider { width:1px; height:20px; background:var(--border); margin:0 4px; }
+
+  /* ── MAIN GRID ── */
+  .main-grid {
+    display:grid; grid-template-columns:1fr 1fr; gap:10px; padding:10px 16px;
+  }
+
+  .panel {
+    background:var(--bg1); border:1px solid var(--border); border-radius:5px; padding:10px;
+  }
+  .panel-label { font-size:9px; color:var(--text-dim); letter-spacing:.14em; margin-bottom:8px; }
+
+  /* ── STATS BAR ── */
+  .stats-bar { display:flex; gap:8px; margin-bottom:10px; }
+  .stat-chip { background:var(--bg2); border:1px solid var(--border); border-radius:3px; padding:4px 8px; flex:1; }
+  .stat-key { font-size:8px; color:var(--text-dim); margin-bottom:2px; letter-spacing:.1em; }
+  .stat-val { font-size:12px; color:var(--amber); }
+
+  /* ── TOKEN PILLS ── */
+  .tokens-area {
+    min-height:140px; display:flex; flex-wrap:wrap; gap:5px; align-content:flex-start;
+    padding:8px; background:var(--bg0); border:1px solid var(--border); border-radius:4px;
+  }
+  .token-pill {
+    display:flex; flex-direction:column; align-items:center; gap:1px;
+    padding:5px 8px; border-radius:4px; border:1px solid; cursor:default;
+    transition:transform .15s, box-shadow .15s;
+    animation: popIn .2s ease backwards;
+  }
+  .token-pill:hover { transform:translateY(-2px); }
+  .token-text { font-size:12px; font-weight:bold; white-space:pre; }
+  .token-id { font-size:8px; opacity:.65; }
+  .token-bytes { font-size:7px; opacity:.4; }
+
+  @keyframes popIn {
+    from { opacity:0; transform:scale(0.8) translateY(4px); }
+    to   { opacity:1; transform:scale(1) translateY(0); }
+  }
+
+  /* ── HEATMAP ── */
+  #heatmap-canvas { display:block; cursor:crosshair; }
+  .heatmap-wrapper { position:relative; }
+  .heatmap-tooltip {
+    position:absolute; background:var(--bg3); border:1px solid var(--amber);
+    border-radius:3px; padding:5px 8px; font-size:10px; color:var(--amber2);
+    pointer-events:none; white-space:nowrap; display:none; z-index:10;
+    box-shadow:0 4px 16px rgba(0,0,0,.6);
+  }
+
+  /* ── COMPARISON ── */
+  .compare-row { display:flex; gap:8px; margin-bottom:8px; }
+  .compare-col { flex:1; }
+  .compare-lang { font-size:9px; color:var(--text-dim); margin-bottom:4px; letter-spacing:.1em; }
+  .compare-tokens { display:flex; flex-wrap:wrap; gap:3px; min-height:40px; padding:6px; background:var(--bg0); border:1px solid var(--border); border-radius:3px; }
+  .mini-pill { font-size:10px; padding:2px 6px; border-radius:3px; border:1px solid; font-weight:bold; }
+
+  /* ── EDUCATIONAL ── */
+  .edu-panel {
+    margin:0 16px 12px; background:var(--bg1); border:1px solid var(--border); border-radius:5px; overflow:hidden;
+  }
+  .edu-tabs { display:flex; border-bottom:1px solid var(--border); }
+  .edu-tab {
+    font-family:var(--mono); font-size:10px; padding:7px 14px; border:none;
+    background:transparent; color:var(--text-dim); cursor:pointer;
+    letter-spacing:.06em; border-bottom:2px solid transparent; transition:all .15s;
+  }
+  .edu-tab:hover { color:var(--amber); }
+  .edu-tab.active { color:var(--amber); border-bottom-color:var(--amber); background:var(--amber-dim); }
+  .edu-content { padding:12px 16px; }
+  .edu-section { display:none; }
+  .edu-section.active { display:block; }
+  .edu-title { font-family:var(--head); font-size:14px; font-weight:700; color:var(--amber); margin-bottom:6px; letter-spacing:.08em; }
+  .edu-body p { font-size:11px; color:#8ba8c8; line-height:1.8; margin-bottom:5px; }
+  .edu-body code { background:var(--bg3); color:var(--amber2); padding:1px 5px; border-radius:2px; font-size:10px; }
+  .edu-body strong { color:var(--text); }
+
+  /* ── SCROLLBAR ── */
+  ::-webkit-scrollbar { width:5px; }
+  ::-webkit-scrollbar-track { background:var(--bg1); }
+  ::-webkit-scrollbar-thumb { background:var(--bg3); border-radius:3px; }
+</style>
+</head>
+<body>
+
+<!-- HEADER -->
+<div class="header">
+  <div class="header-left">
+    <div class="header-title">◈ TOKENIZADOR &amp; TRANSFORMER</div>
+    <div class="header-sub">Como o ChatGPT/GPT-4 processa e interpreta texto · Demonstração ao Vivo</div>
+  </div>
+  <div class="header-badge">ATO 1: Tokenização &nbsp;·&nbsp; ATO 2: Self-Attention</div>
+</div>
+
+<!-- CONTROLS -->
+<div class="controls">
+  <span class="ctrl-label">EXEMPLO:</span>
+  <button class="btn active" id="btn-ex0" onclick="setExample(0)">🇧🇷 Português — Ambiguidade</button>
+  <button class="btn" id="btn-ex1" onclick="setExample(1)">🇧🇷 Português — Subpalavras</button>
+  <button class="btn" id="btn-ex2" onclick="setExample(2)">🇺🇸 Inglês — Comparação</button>
+  <button class="btn" id="btn-ex3" onclick="setExample(3)">🔢 Números &amp; Código</button>
+  <button class="btn" id="btn-custom" onclick="setCustomMode()">✏️ Texto Livre</button>
+  <div class="divider"></div>
+  <input class="custom-input" id="custom-input" type="text" placeholder="Digite qualquer frase..." value=""/>
+  <button class="btn-run" id="btn-run" onclick="runCustom()">▶ TOKENIZAR</button>
+</div>
+
+<!-- MAIN -->
+<div class="main-grid">
+
+  <!-- ATO 1 — TOKENIZADOR -->
+  <div class="panel">
+    <div class="panel-label">◈ ATO 1 — TOKENIZADOR BPE (simulação GPT-4 / cl100k)</div>
+    <div class="stats-bar">
+      <div class="stat-chip"><div class="stat-key">TOKENS</div><div class="stat-val" id="stat-n">—</div></div>
+      <div class="stat-chip"><div class="stat-key">CHARS/TOKEN</div><div class="stat-val" id="stat-ratio">—</div></div>
+      <div class="stat-chip"><div class="stat-key">VOCABULÁRIO</div><div class="stat-val">~100k</div></div>
+      <div class="stat-chip"><div class="stat-key">TIPO</div><div class="stat-val">BPE</div></div>
+    </div>
+    <div class="tokens-area" id="tokens-area"></div>
+
+    <!-- Comparison -->
+    <div style="margin-top:10px;">
+      <div class="panel-label">◈ COMPARAÇÃO IDIOMAS — mesmo texto, tokens diferentes</div>
+      <div class="compare-row">
+        <div class="compare-col">
+          <div class="compare-lang">🇧🇷 PORTUGUÊS</div>
+          <div class="compare-tokens" id="cmp-pt"></div>
+          <div style="font-size:9px;color:var(--text-dim);margin-top:3px;" id="cmp-pt-count"></div>
+        </div>
+        <div class="compare-col">
+          <div class="compare-lang">🇺🇸 ENGLISH</div>
+          <div class="compare-tokens" id="cmp-en"></div>
+          <div style="font-size:9px;color:var(--text-dim);margin-top:3px;" id="cmp-en-count"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ATO 2 — SELF-ATTENTION -->
+  <div class="panel">
+    <div class="panel-label">◈ ATO 2 — SELF-ATTENTION HEATMAP (passe o mouse para explorar)</div>
+    <div class="stats-bar">
+      <div class="stat-chip"><div class="stat-key">HEAD</div><div class="stat-val">1/1 (simplif.)</div></div>
+      <div class="stat-chip"><div class="stat-key">DIM EMBED</div><div class="stat-val">d = 16</div></div>
+      <div class="stat-chip"><div class="stat-key">ESCALA</div><div class="stat-val">1/√d = 0.25</div></div>
+      <div class="stat-chip"><div class="stat-key">HOVER</div><div class="stat-val" id="stat-hover">—</div></div>
+    </div>
+    <div class="heatmap-wrapper">
+      <canvas id="heatmap-canvas"></canvas>
+      <div class="heatmap-tooltip" id="heatmap-tooltip"></div>
+    </div>
+  </div>
+
+</div>
+
+<!-- EDUCATIONAL PANEL -->
+<div class="edu-panel">
+  <div class="edu-tabs">
+    <button class="edu-tab active" onclick="setEduTab(0)">📦 O que é um Token?</button>
+    <button class="edu-tab" onclick="setEduTab(1)">⚙️ Como funciona o BPE?</button>
+    <button class="edu-tab" onclick="setEduTab(2)">👁️ Self-Attention</button>
+    <button class="edu-tab" onclick="setEduTab(3)">🌐 PT vs EN — Por que importa?</button>
+    <button class="edu-tab" onclick="setEduTab(4)">🔢 Números e Código</button>
+  </div>
+  <div class="edu-content">
+
+    <div class="edu-section active" id="edu-0">
+      <div class="edu-title">📦 O que é um Token?</div>
+      <div class="edu-body">
+        <p>Um <strong>token</strong> é a unidade mínima de texto que o modelo processa. <strong>Não é necessariamente uma palavra inteira</strong> — pode ser um pedaço de palavra, um sinal de pontuação, um espaço, ou até um único caractere.</p>
+        <p>O modelo GPT-4 usa um vocabulário de <strong>~100.000 tokens</strong> (cl100k_base). Cada token tem um <strong>ID numérico</strong> único — é exatamente esse número que entra na rede neural, não o texto em si.</p>
+        <p>Exemplo: a palavra <code>incrível</code> pode virar 2 tokens: <code>incr</code> + <code>ível</code>. Já <code>cat</code> em inglês é 1 token só. Isso explica por que textos em português são mais "caros" (mais tokens) que em inglês.</p>
+        <p><strong>Regra prática:</strong> 1 token ≈ 4 caracteres em inglês, ≈ 3 caracteres em português. 100 tokens ≈ 75 palavras em inglês.</p>
+      </div>
+    </div>
+
+    <div class="edu-section" id="edu-1">
+      <div class="edu-title">⚙️ Como funciona o BPE (Byte-Pair Encoding)?</div>
+      <div class="edu-body">
+        <p>O <strong>BPE</strong> é o algoritmo usado para criar o vocabulário de tokens. Funciona assim:</p>
+        <p><strong>1. Começa com caracteres individuais</strong> — cada letra/símbolo é um token separado.</p>
+        <p><strong>2. Encontra os pares mais frequentes</strong> — se "a" + "b" aparecem juntos o tempo todo, junta em "ab".</p>
+        <p><strong>3. Repete até o vocabulário ter o tamanho desejado</strong> (~100k iterações para o GPT-4).</p>
+        <p>Resultado: palavras comuns ficam inteiras (1 token), palavras raras são quebradas em partes reconhecíveis. O modelo nunca encontra uma palavra "desconhecida" — ele sempre consegue representá-la em partes.</p>
+        <p>Observe no painel ao lado: palavras como <code>transformação</code> são divididas em <code>transfor</code> + <code>mação</code>. Cada parte recebe um ID diferente. O modelo aprende o significado de cada pedaço e como combiná-los.</p>
+      </div>
+    </div>
+
+    <div class="edu-section" id="edu-2">
+      <div class="edu-title">👁️ Self-Attention — Como o modelo entende contexto</div>
+      <div class="edu-body">
+        <p>O mecanismo de <strong>Self-Attention</strong> é o coração do Transformer. Ele permite que cada token "olhe" para todos os outros tokens da frase e decida o quanto de atenção dar a cada um.</p>
+        <p>A fórmula é: <code>Attention(Q, K, V) = softmax( Q · Kᵀ / √d ) · V</code></p>
+        <p>• <strong>Q (Query)</strong>: "O que eu estou procurando?"<br>• <strong>K (Key)</strong>: "O que eu tenho a oferecer?"<br>• <strong>V (Value)</strong>: "O que eu passo adiante se for relevante?"</p>
+        <p>No heatmap, cada <strong>linha</strong> é um token fazendo a pergunta; cada <strong>coluna</strong> é um token sendo consultado. Uma célula <strong>mais brilhante</strong> significa que o token-linha presta mais atenção ao token-coluna.</p>
+        <p>Isso é o que permite o modelo entender que em "O banco estava cheio", a palavra <strong>"banco"</strong> deve se relacionar com <strong>"pagamento"</strong> (banco financeiro) — o contexto muda o significado!</p>
+      </div>
+    </div>
+
+    <div class="edu-section" id="edu-3">
+      <div class="edu-title">🌐 PT vs EN — Por que o português usa mais tokens?</div>
+      <div class="edu-body">
+        <p>O GPT-4 foi treinado com muito mais texto em <strong>inglês</strong> do que em português. Por isso o vocabulário BPE foi otimizado para o inglês — palavras comuns em inglês cabem em 1 token, enquanto equivalentes em português são fragmentadas.</p>
+        <p>Exemplo comparativo:</p>
+        <p>• EN: <code>transformation</code> → 1 token &nbsp;|&nbsp; PT: <code>transformação</code> → 3 tokens</p>
+        <p>• EN: <code>beautiful</code> → 2 tokens &nbsp;|&nbsp; PT: <code>linda</code> → 2 tokens (empate!)</p>
+        <p>• EN: <code>the cat sat</code> → 3 tokens &nbsp;|&nbsp; PT: <code>o gato sentou</code> → 4–5 tokens</p>
+        <p><strong>Consequência prática:</strong> enviar o mesmo conteúdo em português custa ~30-50% mais tokens do que em inglês — e os modelos cobram por token. Além disso, o modelo "vê" o texto português como fatias menores, o que pode afetar a qualidade da compreensão.</p>
+      </div>
+    </div>
+
+    <div class="edu-section" id="edu-4">
+      <div class="edu-title">🔢 Como números e código são tokenizados?</div>
+      <div class="edu-body">
+        <p>Números são tokenizados de forma <strong>imprevisível</strong> — esse é um dos motivos pelos quais LLMs têm dificuldade com aritmética!</p>
+        <p>• <code>1234</code> pode ser 1 token, mas <code>12345</code> pode ser 2 ou 3 tokens diferentes.</p>
+        <p>• O modelo não "vê" dígitos individuais — ele vê pedaços de número, sem noção de posição decimal ou valor real.</p>
+        <p>Para código, o tokenizador foi ajustado para reconhecer padrões comuns de programação. Palavras-chave como <code>def</code>, <code>for</code>, <code>import</code> são 1 token. Nomes de variáveis longos são quebrados. Espaços de indentação também são tokens!</p>
+        <p>Experimente digitar um número grande como <code>3141592653589793</code> ou um trecho de código Python no campo "Texto Livre" e observe como o tokenizador lida com isso.</p>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════
+// BPE-LIKE TOKENIZER SIMULATION
+// ═══════════════════════════════════════════════════════
+
+// Vocabulary: common Portuguese and English subwords + special patterns
+// This simulates GPT-4's cl100k tokenizer behavior plausibly
+const VOCAB_RULES = {
+  // Common PT words → 1 token
+  pt_whole: new Set([
+    'o','a','os','as','um','uma','de','da','do','dos','das','em','no','na','nos','nas',
+    'por','para','com','que','se','não','e','é','era','foi','ser','ter','há','está','são',
+    'mais','mas','seu','sua','seus','suas','este','esta','esse','essa','isso',
+    'como','quando','onde','muito','pouco','bem','mal','já','ainda','também',
+    'pois','porque','então','assim','mesmo','cada','todo','toda','todos','todas',
+    'gato','banco','casa','carro','pessoa','tempo','dia','ano','vez','parte','vida',
+    'cheio','novo','grande','pequeno','velho','bom','ruim','cansado','tapete','sentou',
+    'estava','pagamento','transformação','processamento','linguagem','modelo','atenção'
+  ]),
+  // Common EN words → 1 token
+  en_whole: new Set([
+    'the','a','an','of','in','on','at','to','for','and','or','but','not','is','was',
+    'are','were','be','been','have','has','had','do','does','did','will','would',
+    'can','could','should','may','might','shall','this','that','these','those',
+    'he','she','it','we','they','I','you','my','your','his','her','its','our','their',
+    'what','when','where','how','why','who','which','with','from','by','about',
+    'cat','sat','mat','because','tired','bank','full','payment','changed','everything',
+    'transformer','model','language','attention','processing','everything'
+  ]),
+  // Subword rules: suffix → split point (from the right)
+  pt_suffixes: [
+    'ação','ções','mente','ista','ável','ível','oso','osa','eiro','eira','inha','inho',
+    'zinho','zinha','íssimo','ismo','agem','ando','endo','indo','ado','ida','ção'
+  ],
+  pt_prefixes: ['des','pre','re','trans','inter','super','sub','anti','auto','contra','entre'],
+  en_suffixes: ['tion','sion','ment','ness','ful','less','ing','ed','er','ly','ous','ive','ize','ise','ation'],
+  en_prefixes: ['un','re','pre','dis','mis','over','under','out','trans','inter']
+};
+
+// Hash function for consistent IDs
+function strHash(s) {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h) + s.charCodeAt(i);
+  return (h >>> 0) % 99871;
+}
+
+// Token color palette — 24 vivid distinct colors
+const TOKEN_COLORS = [
+  ['#f5a623','rgba(245,166,35,0.18)'],  // amber
+  ['#2ecc71','rgba(46,204,113,0.18)'],  // green
+  ['#3498db','rgba(52,152,219,0.18)'],  // blue
+  ['#e74c3c','rgba(231,76,60,0.18)'],   // red
+  ['#9b59b6','rgba(155,89,182,0.18)'],  // purple
+  ['#1abc9c','rgba(26,188,156,0.18)'],  // teal
+  ['#e67e22','rgba(230,126,34,0.18)'],  // orange
+  ['#e91e63','rgba(233,30,99,0.18)'],   // pink
+  ['#00bcd4','rgba(0,188,212,0.18)'],   // cyan
+  ['#8bc34a','rgba(139,195,74,0.18)'],  // lime
+  ['#ff5722','rgba(255,87,34,0.18)'],   // deep orange
+  ['#607d8b','rgba(96,125,139,0.18)'],  // blue-grey
+  ['#cddc39','rgba(205,220,57,0.18)'],  // yellow-green
+  ['#795548','rgba(121,85,72,0.18)'],   // brown
+  ['#f06292','rgba(240,98,146,0.18)'],  // light pink
+  ['#4fc3f7','rgba(79,195,247,0.18)'],  // light blue
+  ['#aed581','rgba(174,213,129,0.18)'], // light green
+  ['#ffb74d','rgba(255,183,77,0.18)'],  // light orange
+  ['#ba68c8','rgba(186,104,200,0.18)'], // light purple
+  ['#4db6ac','rgba(77,182,172,0.18)'],  // light teal
+  ['#fff176','rgba(255,241,118,0.18)'], // yellow
+  ['#ef9a9a','rgba(239,154,154,0.18)'], // light red
+  ['#80cbc4','rgba(128,203,196,0.18)'], // mint
+  ['#ce93d8','rgba(206,147,216,0.18)'], // lavender
+];
+
+function tokenColor(idx) {
+  return TOKEN_COLORS[idx % TOKEN_COLORS.length];
+}
+
+// BPE-like split for a single word
+function splitWord(word) {
+  const lower = word.toLowerCase();
+
+  // Very short words → whole
+  if (lower.length <= 3) return [word];
+
+  // Number → split into groups of 3 digits
+  if (/^\d+$/.test(word)) {
+    const parts = [];
+    let s = word;
+    while (s.length > 3) { parts.unshift(s.slice(-3)); s = s.slice(0, -3); }
+    if (s) parts.unshift(s);
+    return parts.length > 1 ? parts : [word];
+  }
+
+  // Code-like tokens → split at camelCase or underscore boundaries
+  if (/[A-Z_]/.test(word)) {
+    const parts = word.split(/(?=[A-Z])|_/).filter(Boolean);
+    if (parts.length > 1) return parts.map(p => p || '_');
+  }
+
+  // Check whole-word vocabularies
+  if (VOCAB_RULES.pt_whole.has(lower) || VOCAB_RULES.en_whole.has(lower)) return [word];
+
+  // Try PT suffix split
+  for (const sfx of VOCAB_RULES.pt_suffixes) {
+    if (lower.endsWith(sfx) && lower.length > sfx.length + 2) {
+      const stem = word.slice(0, lower.length - sfx.length);
+      return [stem, sfx];
+    }
+  }
+  // Try EN suffix split
+  for (const sfx of VOCAB_RULES.en_suffixes) {
+    if (lower.endsWith(sfx) && lower.length > sfx.length + 2) {
+      const stem = word.slice(0, lower.length - sfx.length);
+      return [stem, sfx];
+    }
+  }
+  // Try PT prefix split
+  for (const pfx of VOCAB_RULES.pt_prefixes) {
+    if (lower.startsWith(pfx) && lower.length > pfx.length + 3) {
+      const rest = word.slice(pfx.length);
+      return [pfx, rest];
+    }
+  }
+  // Try EN prefix split
+  for (const pfx of VOCAB_RULES.en_prefixes) {
+    if (lower.startsWith(pfx) && lower.length > pfx.length + 3) {
+      const rest = word.slice(pfx.length);
+      return [pfx, rest];
+    }
+  }
+
+  // Long words → split roughly at midpoint near a vowel
+  if (lower.length > 7) {
+    const mid = Math.floor(lower.length * 0.55);
+    // find nearest vowel to mid
+    let split = mid;
+    for (let d = 0; d < 4; d++) {
+      if ('aeiouáéíóúâêîôûãõàèìòù'.includes(lower[mid - d])) { split = mid - d; break; }
+      if ('aeiouáéíóúâêîôûãõàèìòù'.includes(lower[mid + d])) { split = mid + d + 1; break; }
+    }
+    if (split > 2 && split < lower.length - 2) {
+      return [word.slice(0, split), word.slice(split)];
+    }
+  }
+
+  return [word];
+}
+
+function tokenize(text) {
+  // Split on spaces and punctuation, keeping both
+  const raw = text.match(/\w+|[^\w\s]|\s+/g) || [];
+  const tokens = [];
+  for (const piece of raw) {
+    if (/^\s+$/.test(piece)) {
+      // Spaces — represent as Ġ-prefixed (GPT-style)
+      for (let i = 0; i < piece.length; i++) tokens.push('▁');
+      continue;
+    }
+    if (/^[^\w]+$/.test(piece)) {
+      // Punctuation chars split individually
+      for (const c of piece) tokens.push(c);
+      continue;
+    }
+    // Regular word
+    const parts = splitWord(piece);
+    // Mark first subword with space prefix if preceded by space
+    tokens.push(...parts);
+  }
+  // Remove standalone space markers — attach prefix to next token
+  const merged = [];
+  let pendingSpace = false;
+  for (const t of tokens) {
+    if (t === '▁') { pendingSpace = true; continue; }
+    merged.push(pendingSpace ? ' ' + t : t);
+    pendingSpace = false;
+  }
+  return merged.filter(t => t.trim() !== '');
+}
+
+function getTokenId(tok) {
+  return strHash(tok.trim().toLowerCase());
+}
+
+// ═══════════════════════════════════════════════════════
+// SELF-ATTENTION
+// ═══════════════════════════════════════════════════════
+
+// Seeded random for consistent embeddings per token text
+function seededRng(str) {
+  let seed = 0;
+  for (let i = 0; i < str.length; i++) seed = (seed * 31 + str.charCodeAt(i)) | 0;
+  return function() {
+    seed = (seed * 1664525 + 1013904223) | 0;
+    return (seed >>> 0) / 4294967296;
+  };
+}
+
+function gaussRng(rng) {
+  const u = rng() || 1e-9, v = rng();
+  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+}
+
+function tokenEmbedding(tok, dim) {
+  const rng = seededRng(tok.trim().toLowerCase());
+  return Array.from({length: dim}, () => gaussRng(rng));
+}
+
+function softmaxRow(arr) {
+  const mx = Math.max(...arr);
+  const ex = arr.map(x => Math.exp(x - mx));
+  const s = ex.reduce((a,b) => a+b, 0);
+  return ex.map(x => x / s);
+}
+
+function computeAttention(tokens) {
+  const DIM = 16;
+  const embs = tokens.map(t => tokenEmbedding(t, DIM));
+  const sqrtD = Math.sqrt(DIM);
+  const n = tokens.length;
+  const weights = [];
+  for (let i = 0; i < n; i++) {
+    const scores = embs.map(ej => embs[i].reduce((s, v, k) => s + v * ej[k], 0) / sqrtD);
+    weights.push(softmaxRow(scores));
+  }
+  return weights;
+}
+
+// ═══════════════════════════════════════════════════════
+// EXAMPLES
+// ═══════════════════════════════════════════════════════
+
+const EXAMPLES = [
+  {
+    text: "O banco estava cheio pois era dia de pagamento",
+    cmpPt: "transformação automática de linguagem",
+    cmpEn: "automatic language transformation",
+    label: "Ambiguidade contextual (banco = banco financeiro ou banco de sentar?)"
+  },
+  {
+    text: "A transformação do processamento de linguagem natural foi incrível",
+    cmpPt: "incrível processamento automático",
+    cmpEn: "incredible automatic processing",
+    label: "Subpalavras — observe como palavras longas são fragmentadas"
+  },
+  {
+    text: "The transformer model changed everything in AI research",
+    cmpPt: "o modelo transformer mudou tudo",
+    cmpEn: "the transformer model changed everything",
+    label: "Inglês vs Português — compare o número de tokens"
+  },
+  {
+    text: "x = 3.14159 * radius ** 2 + offset_value",
+    cmpPt: "resultado = 3.14159 * raio ao quadrado",
+    cmpEn: "result = 3.14159 * radius squared",
+    label: "Código e números — tokenização especial para programação"
+  }
+];
+
+let currentTokens = [];
+let currentExampleIdx = 0;
+let isCustomMode = false;
+
+// ═══════════════════════════════════════════════════════
+// RENDER TOKENS
+// ═══════════════════════════════════════════════════════
+
+function renderTokens(tokens, containerId, mini=false) {
+  const area = document.getElementById(containerId);
+  area.innerHTML = '';
+  tokens.forEach((tok, i) => {
+    const id = getTokenId(tok);
+    const [color, bg] = tokenColor(i);
+    if (mini) {
+      const pill = document.createElement('div');
+      pill.className = 'mini-pill';
+      pill.style.color = color;
+      pill.style.borderColor = color;
+      pill.style.background = bg;
+      pill.textContent = tok;
+      area.appendChild(pill);
+    } else {
+      const pill = document.createElement('div');
+      pill.className = 'token-pill';
+      pill.style.borderColor = color;
+      pill.style.background = bg;
+      pill.style.animationDelay = (i * 0.04) + 's';
+      pill.innerHTML = `<span class="token-text" style="color:${color}">${escapeHtml(tok)}</span><span class="token-id" style="color:${color}">#${id}</span>`;
+      area.appendChild(pill);
+    }
+  });
+}
+
+function escapeHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/ /g,'·');
+}
+
+function updateStats(tokens, text) {
+  document.getElementById('stat-n').textContent = tokens.length;
+  const ratio = tokens.length > 0 ? (text.replace(/\s/g,'').length / tokens.length).toFixed(1) : '—';
+  document.getElementById('stat-ratio').textContent = ratio;
+}
+
+// ═══════════════════════════════════════════════════════
+// HEATMAP CANVAS
+// ═══════════════════════════════════════════════════════
+
+const canvas = document.getElementById('heatmap-canvas');
+const ctx = canvas.getContext('2d');
+const tooltip = document.getElementById('heatmap-tooltip');
+let heatTokens = [];
+let heatWeights = [];
+let cellSize = 0;
+let padLeft = 0, padTop = 0;
+let hoveredRow = -1, hoveredCol = -1;
+
+function drawHeatmap(tokens) {
+  if (!tokens || tokens.length === 0) return;
+  const MAX_TOKS = 12;
+  heatTokens = tokens.slice(0, MAX_TOKS).map(t => t.trim() || '·');
+  heatWeights = computeAttention(heatTokens);
+
+  const n = heatTokens.length;
+  const container = canvas.parentElement;
+  const availW = container.offsetWidth - 2;
+
+  // Dynamic sizing
+  const maxLabelLen = Math.max(...heatTokens.map(t => t.length));
+  padLeft = Math.min(Math.max(maxLabelLen * 7, 55), 100);
+  padTop = 45;
+  const padRight = 12, padBottom = 12;
+
+  cellSize = Math.floor((availW - padLeft - padRight) / n);
+  const totalH = padTop + n * cellSize + padBottom;
+
+  canvas.width = availW;
+  canvas.height = totalH;
+  canvas.style.width = availW + 'px';
+  canvas.style.height = totalH + 'px';
+
+  redrawHeatmap();
+}
+
+function redrawHeatmap() {
+  const n = heatTokens.length;
+  if (n === 0) return;
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  // Background
+  ctx.fillStyle = '#08090b';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  const maxW = Math.max(...heatWeights.flat());
+
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j < n; j++) {
+      const w = heatWeights[i][j];
+      const norm = w / maxW;
+      const x = padLeft + j * cellSize;
+      const y = padTop + i * cellSize;
+
+      // Cell color — amber gradient
+      const alpha = 0.05 + norm * 0.92;
+      const r = Math.floor(180 + norm * 75);
+      const g = Math.floor(80 + norm * 86);
+      const b = Math.floor(10 + norm * 15);
+
+      // Highlight hovered row/col
+      const isHovRow = i === hoveredRow;
+      const isHovCol = j === hoveredCol;
+      const isHovCell = i === hoveredRow && j === hoveredCol;
+
+      ctx.fillStyle = `rgba(${r},${g},${b},${alpha})`;
+      ctx.fillRect(x, y, cellSize - 1, cellSize - 1);
+
+      // Row/col highlight
+      if (isHovRow || isHovCol) {
+        ctx.fillStyle = 'rgba(255,255,255,0.07)';
+        ctx.fillRect(x, y, cellSize - 1, cellSize - 1);
+      }
+      if (isHovCell) {
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(x + 1, y + 1, cellSize - 3, cellSize - 3);
+      }
+
+      // Max attention marker per row (cyan border)
+      const maxJ = heatWeights[i].indexOf(Math.max(...heatWeights[i]));
+      if (j === maxJ && !isHovCell) {
+        ctx.strokeStyle = 'rgba(0,212,255,0.7)';
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(x + 1, y + 1, cellSize - 3, cellSize - 3);
+      }
+
+      // Weight value in cell if large enough
+      if (cellSize > 28) {
+        ctx.fillStyle = norm > 0.5 ? 'rgba(0,0,0,0.7)' : 'rgba(255,255,255,0.45)';
+        ctx.font = `${Math.min(9, cellSize * 0.28)}px "Share Tech Mono", monospace`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(w.toFixed(2), x + cellSize/2, y + cellSize/2);
+      }
+    }
+  }
+
+  // Axis labels — columns (top, rotated)
+  ctx.save();
+  ctx.font = `${Math.min(11, cellSize * 0.38)}px "Share Tech Mono", monospace`;
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  for (let j = 0; j < n; j++) {
+    const x = padLeft + j * cellSize + cellSize / 2;
+    const y = padTop - 6;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(-Math.PI / 3);
+    ctx.fillStyle = j === hoveredCol ? '#f5a623' : 'rgba(180,210,240,0.7)';
+    ctx.fillText(heatTokens[j], 0, 0);
+    ctx.restore();
+  }
+  ctx.restore();
+
+  // Axis labels — rows (left)
+  ctx.font = `${Math.min(11, cellSize * 0.38)}px "Share Tech Mono", monospace`;
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  for (let i = 0; i < n; i++) {
+    const y = padTop + i * cellSize + cellSize / 2;
+    ctx.fillStyle = i === hoveredRow ? '#f5a623' : 'rgba(180,210,240,0.7)';
+    ctx.fillText(heatTokens[i], padLeft - 6, y);
+  }
+
+  // Legend bar
+  const legW = Math.min(120, n * cellSize);
+  const legH = 7;
+  const legX = padLeft;
+  const legY = padTop + n * cellSize + 4;
+  const grad = ctx.createLinearGradient(legX, 0, legX + legW, 0);
+  grad.addColorStop(0, 'rgba(60,20,5,0.4)');
+  grad.addColorStop(1, 'rgba(255,166,0,0.9)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(legX, legY, legW, legH);
+  ctx.fillStyle = 'rgba(100,140,180,0.6)';
+  ctx.font = '8px "Share Tech Mono", monospace';
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  ctx.fillText('baixo', legX, legY + legH + 2);
+  ctx.textAlign = 'right';
+  ctx.fillText('alto', legX + legW, legY + legH + 2);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = 'rgba(100,140,180,0.5)';
+  ctx.fillText('← atenção →', legX + legW / 2, legY + legH + 2);
+}
+
+canvas.addEventListener('mousemove', (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+
+  const col = Math.floor((mx - padLeft) / cellSize);
+  const row = Math.floor((my - padTop) / cellSize);
+  const n = heatTokens.length;
+
+  if (col >= 0 && col < n && row >= 0 && row < n) {
+    hoveredRow = row; hoveredCol = col;
+    const w = heatWeights[row][col];
+    const pct = (w * 100).toFixed(1);
+    const maxJ = heatWeights[row].indexOf(Math.max(...heatWeights[row]));
+    const dominated = col === maxJ ? ' ← MÁXIMO' : '';
+    tooltip.style.display = 'block';
+    tooltip.style.left = (padLeft + col * cellSize + cellSize + 4) + 'px';
+    tooltip.style.top = (padTop + row * cellSize) + 'px';
+    tooltip.textContent = `"${heatTokens[row]}" → "${heatTokens[col]}" : ${pct}%${dominated}`;
+    document.getElementById('stat-hover').textContent = `${heatTokens[row]}→${heatTokens[col]}: ${pct}%`;
+    redrawHeatmap();
+  } else {
+    if (hoveredRow !== -1) { hoveredRow = -1; hoveredCol = -1; tooltip.style.display = 'none'; document.getElementById('stat-hover').textContent = '—'; redrawHeatmap(); }
+  }
+});
+canvas.addEventListener('mouseleave', () => {
+  hoveredRow = -1; hoveredCol = -1;
+  tooltip.style.display = 'none';
+  document.getElementById('stat-hover').textContent = '—';
+  redrawHeatmap();
+});
+
+// ═══════════════════════════════════════════════════════
+// MAIN RENDER
+// ═══════════════════════════════════════════════════════
+
+function render(text) {
+  const tokens = tokenize(text);
+  currentTokens = tokens;
+  renderTokens(tokens, 'tokens-area');
+  updateStats(tokens, text);
+  drawHeatmap(tokens);
+}
+
+function renderComparison(ptText, enText) {
+  const ptToks = tokenize(ptText);
+  const enToks = tokenize(enText);
+  renderTokens(ptToks, 'cmp-pt', true);
+  renderTokens(enToks, 'cmp-en', true);
+  document.getElementById('cmp-pt-count').textContent = `${ptToks.length} tokens`;
+  document.getElementById('cmp-en-count').textContent = `${enToks.length} tokens`;
+}
+
+// ═══════════════════════════════════════════════════════
+// CONTROLS
+// ═══════════════════════════════════════════════════════
+
+function setExample(idx) {
+  currentExampleIdx = idx;
+  isCustomMode = false;
+  document.getElementById('custom-input').classList.remove('visible');
+  document.getElementById('btn-run').classList.remove('visible');
+  [0,1,2,3].forEach(i => document.getElementById('btn-ex'+i).classList.toggle('active', i===idx));
+  document.getElementById('btn-custom').classList.remove('active');
+  const ex = EXAMPLES[idx];
+  render(ex.text);
+  renderComparison(ex.cmpPt, ex.cmpEn);
+}
+
+function setCustomMode() {
+  isCustomMode = true;
+  document.getElementById('custom-input').classList.add('visible');
+  document.getElementById('btn-run').classList.add('visible');
+  [0,1,2,3].forEach(i => document.getElementById('btn-ex'+i).classList.remove('active'));
+  document.getElementById('btn-custom').classList.add('active');
+  document.getElementById('custom-input').focus();
+}
+
+function runCustom() {
+  const text = document.getElementById('custom-input').value.trim();
+  if (!text) return;
+  render(text);
+  renderComparison(text, text); // compare tokenization of same text (identical, shows structure)
+  document.getElementById('cmp-pt-count').textContent += ' (mesmo texto)';
+  document.getElementById('cmp-en-count').textContent = '—';
+}
+
+document.getElementById('custom-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') runCustom();
+});
+
+// ═══════════════════════════════════════════════════════
+// EDUCATIONAL TABS
+// ═══════════════════════════════════════════════════════
+
+function setEduTab(idx) {
+  document.querySelectorAll('.edu-tab').forEach((t,i) => t.classList.toggle('active', i===idx));
+  document.querySelectorAll('.edu-section').forEach((s,i) => s.classList.toggle('active', i===idx));
+}
+
+// ═══════════════════════════════════════════════════════
+// INIT
+// ═══════════════════════════════════════════════════════
+
+window.addEventListener('load', () => {
+  setExample(0);
+});
+
+window.addEventListener('resize', () => {
+  if (currentTokens.length > 0) drawHeatmap(currentTokens);
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,749 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>OCR com IA — Como modelos lêem imagens</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;700;900&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg0: #060b08; --bg1: #0b120e; --bg2: #101a14; --bg3: #172118;
+    --border: #1d3025; --border2: #254032;
+    --green: #00ff88; --green2: #00cc6a; --green-dim: rgba(0,255,136,0.10);
+    --green-glow: rgba(0,255,136,0.25);
+    --amber: #ffb830; --red: #ff4466; --blue: #40c8ff;
+    --text: #b8d4c0; --text-dim: #3a5c44;
+    --mono: 'Share Tech Mono', 'Courier New', monospace;
+    --head: 'Orbitron', sans-serif;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { height:100%; background:var(--bg0); color:var(--text); font-family:var(--mono); font-size:13px; overflow-x:hidden; }
+
+  /* scanline */
+  body::after { content:''; position:fixed; inset:0; pointer-events:none; z-index:9999;
+    background:repeating-linear-gradient(0deg,transparent,transparent 3px,rgba(0,0,0,0.025) 3px,rgba(0,0,0,0.025) 4px); }
+
+  /* ── HEADER ── */
+  .header {
+    display:flex; align-items:center; justify-content:space-between;
+    padding:10px 16px; border-bottom:1px solid var(--border);
+    background:linear-gradient(90deg, var(--bg1), rgba(0,255,136,0.03) 100%);
+  }
+  .logo { display:flex; flex-direction:column; gap:2px; }
+  .logo-title { font-family:var(--head); font-size:14px; font-weight:700; color:var(--green); letter-spacing:.25em; text-shadow:0 0 20px var(--green-glow); }
+  .logo-sub { font-size:9px; color:var(--text-dim); letter-spacing:.14em; }
+  .api-row { display:flex; align-items:center; gap:8px; }
+  .api-label { font-size:9px; color:var(--text-dim); letter-spacing:.1em; }
+  .api-input {
+    font-family:var(--mono); font-size:10px; width:260px;
+    background:var(--bg2); border:1px solid var(--border2); color:var(--text);
+    padding:5px 10px; border-radius:3px; outline:none; transition:border-color .2s;
+    letter-spacing:.05em;
+  }
+  .api-input:focus { border-color:var(--green); box-shadow:0 0 8px var(--green-dim); }
+  .api-status { font-size:9px; padding:3px 8px; border-radius:3px; border:1px solid; letter-spacing:.08em; }
+  .api-status.ok { color:var(--green); border-color:var(--green); background:var(--green-dim); }
+  .api-status.empty { color:var(--text-dim); border-color:var(--border); }
+
+  /* ── MAIN LAYOUT ── */
+  .body-grid { display:grid; grid-template-columns:1fr 1fr; gap:0; height:calc(100vh - 120px); }
+
+  /* ── LEFT PANEL ── */
+  .left-panel { border-right:1px solid var(--border); display:flex; flex-direction:column; }
+
+  .panel-head { padding:8px 12px; border-bottom:1px solid var(--border); background:var(--bg1); display:flex; align-items:center; justify-content:space-between; }
+  .panel-head-title { font-size:9px; color:var(--text-dim); letter-spacing:.14em; }
+  .panel-head-actions { display:flex; gap:6px; }
+
+  .btn {
+    font-family:var(--mono); font-size:10px; padding:4px 11px;
+    border:1px solid var(--border2); background:transparent; color:var(--text-dim);
+    cursor:pointer; border-radius:3px; transition:all .15s; letter-spacing:.06em;
+  }
+  .btn:hover { border-color:var(--green); color:var(--green); background:var(--green-dim); }
+  .btn.primary { border-color:var(--green); color:var(--green); background:var(--green-dim); }
+  .btn.primary:hover { background:rgba(0,255,136,0.2); }
+  .btn.danger { border-color:var(--border2); color:var(--text-dim); }
+
+  /* Drop Zone */
+  .drop-zone {
+    flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center;
+    gap:12px; cursor:pointer; transition:background .2s; padding:16px; position:relative;
+    background:var(--bg0);
+  }
+  .drop-zone.has-image { padding:0; }
+  .drop-zone.drag-over { background:var(--green-dim); }
+  .drop-icon { font-size:36px; opacity:.3; }
+  .drop-text { font-size:11px; color:var(--text-dim); text-align:center; line-height:1.8; }
+  .drop-text span { color:var(--green); cursor:pointer; }
+  #file-input { display:none; }
+
+  .img-container { position:relative; width:100%; height:100%; overflow:hidden; }
+  #preview-img { display:none; width:100%; height:100%; object-fit:contain; background:var(--bg0); }
+  .img-container.active #preview-img { display:block; }
+
+  /* Overlay scan line animation */
+  .scan-line {
+    position:absolute; left:0; right:0; height:2px;
+    background:linear-gradient(90deg, transparent, var(--green), transparent);
+    box-shadow:0 0 12px var(--green); pointer-events:none;
+    display:none; top:0;
+  }
+  .scanning .scan-line { display:block; animation:scanAnim 1.8s linear infinite; }
+  @keyframes scanAnim { from{top:0%} to{top:100%} }
+
+  /* OCR boxes overlay */
+  #overlay-canvas { position:absolute; top:0; left:0; pointer-events:none; }
+
+  /* ── RIGHT PANEL ── */
+  .right-panel { display:flex; flex-direction:column; overflow:hidden; }
+
+  /* Results */
+  .results-area {
+    flex:1; overflow-y:auto; padding:12px; display:flex; flex-direction:column; gap:8px;
+    background:var(--bg0); min-height:0;
+  }
+  .results-area::-webkit-scrollbar { width:4px; }
+  .results-area::-webkit-scrollbar-track { background:var(--bg1); }
+  .results-area::-webkit-scrollbar-thumb { background:var(--border2); border-radius:2px; }
+
+  .result-placeholder { display:flex; flex-direction:column; align-items:center; justify-content:center; height:100%; gap:10px; color:var(--text-dim); }
+  .result-placeholder-icon { font-size:32px; opacity:.2; }
+  .result-placeholder-text { font-size:10px; letter-spacing:.1em; text-align:center; line-height:2; }
+
+  .result-block {
+    background:var(--bg2); border:1px solid var(--border2); border-radius:4px;
+    padding:10px 12px; animation:fadeUp .3s ease backwards;
+    border-left:3px solid var(--green);
+  }
+  .result-block.low-conf { border-left-color:var(--amber); }
+  .result-block.very-low { border-left-color:var(--red); }
+
+  @keyframes fadeUp { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:translateY(0)} }
+
+  .result-text { font-size:14px; color:var(--text); line-height:1.5; margin-bottom:6px; word-break:break-word; }
+  .result-meta { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .conf-bar-wrap { flex:1; height:4px; background:var(--bg3); border-radius:2px; min-width:60px; }
+  .conf-bar { height:4px; border-radius:2px; transition:width .6s ease; }
+  .conf-label { font-size:9px; color:var(--text-dim); white-space:nowrap; }
+  .type-tag { font-size:8px; padding:2px 6px; border-radius:2px; border:1px solid; letter-spacing:.08em; }
+  .type-tag.printed { color:var(--green); border-color:var(--green); background:var(--green-dim); }
+  .type-tag.handwritten { color:var(--amber); border-color:var(--amber); background:rgba(255,184,48,.1); }
+  .type-tag.code { color:var(--blue); border-color:var(--blue); background:rgba(64,200,255,.1); }
+  .type-tag.number { color:#cc88ff; border-color:#cc88ff; background:rgba(200,136,255,.1); }
+
+  /* Progress / status strip */
+  .status-strip {
+    padding:6px 12px; background:var(--bg1); border-top:1px solid var(--border);
+    display:flex; align-items:center; gap:10px; font-size:9px; color:var(--text-dim);
+    letter-spacing:.1em; min-height:32px;
+  }
+  .status-dot { width:6px; height:6px; border-radius:50%; background:var(--border2); flex-shrink:0; }
+  .status-dot.active { background:var(--green); box-shadow:0 0 6px var(--green); animation:blink .8s step-start infinite; }
+  @keyframes blink { 50%{opacity:0} }
+  .status-dot.done { background:var(--green); }
+  .status-dot.error { background:var(--red); }
+  .status-text { flex:1; }
+  .stats-chips { display:flex; gap:6px; margin-left:auto; }
+  .chip { background:var(--bg2); border:1px solid var(--border); border-radius:2px; padding:2px 7px; color:var(--text-dim); font-size:8px; }
+  .chip.lit { color:var(--green); border-color:var(--border2); }
+
+  /* ── BOTTOM EDUACTION PANEL ── */
+  .edu-panel { border-top:1px solid var(--border); background:var(--bg1); flex-shrink:0; }
+  .edu-tabs { display:flex; border-bottom:1px solid var(--border); overflow-x:auto; }
+  .edu-tab {
+    font-family:var(--mono); font-size:9px; padding:7px 13px; border:none;
+    background:transparent; color:var(--text-dim); cursor:pointer;
+    border-bottom:2px solid transparent; white-space:nowrap; transition:all .15s; letter-spacing:.07em;
+  }
+  .edu-tab:hover { color:var(--green); }
+  .edu-tab.active { color:var(--green); border-bottom-color:var(--green); background:var(--green-dim); }
+  .edu-body { padding:11px 14px; font-size:11px; color:#6a9a78; line-height:1.8; max-height:120px; overflow-y:auto; }
+  .edu-body::-webkit-scrollbar { width:3px; }
+  .edu-body::-webkit-scrollbar-thumb { background:var(--border2); }
+  .edu-body p { margin-bottom:4px; }
+  .edu-body strong { color:var(--text); }
+  .edu-body code { background:var(--bg3); color:#80ffb8; padding:1px 5px; border-radius:2px; font-size:10px; }
+
+  /* Full text output */
+  .full-text-area {
+    margin:8px 12px 0; background:var(--bg1); border:1px solid var(--border2);
+    border-radius:4px; padding:10px 12px; font-size:11px; color:var(--text);
+    line-height:1.9; max-height:120px; overflow-y:auto; white-space:pre-wrap; word-break:break-word;
+    display:none;
+  }
+  .full-text-area.visible { display:block; }
+  .full-text-label { font-size:8px; color:var(--text-dim); letter-spacing:.12em; margin:10px 12px 0; display:none; }
+  .full-text-label.visible { display:block; }
+
+  /* samples */
+  .sample-grid { display:flex; gap:6px; padding:0 12px 8px; flex-wrap:wrap; }
+  .sample-btn { font-family:var(--mono); font-size:9px; padding:3px 9px; border:1px solid var(--border2); background:transparent; color:var(--text-dim); cursor:pointer; border-radius:3px; transition:all .15s; }
+  .sample-btn:hover { border-color:var(--green); color:var(--green); background:var(--green-dim); }
+</style>
+</head>
+<body>
+
+<!-- HEADER -->
+<div class="header">
+  <div class="logo">
+    <div class="logo-title">◈ OCR · LEITURA DE IMAGEM POR IA</div>
+    <div class="logo-sub">Reconhecimento Óptico de Caracteres · Groq · Llama 4 Scout Vision · Demonstração Educacional</div>
+  </div>
+  <div class="api-row">
+    <span class="api-label">GROQ API KEY:</span>
+    <input class="api-input" id="api-key" type="password" placeholder="gsk_...  (necessário para OCR real)" autocomplete="off"/>
+    <div class="api-status empty" id="api-status">SEM CHAVE</div>
+  </div>
+</div>
+
+<!-- BODY -->
+<div class="body-grid">
+
+  <!-- LEFT: Image Drop -->
+  <div class="left-panel">
+    <div class="panel-head">
+      <span class="panel-head-title">◈ IMAGEM DE ENTRADA</span>
+      <div class="panel-head-actions">
+        <button class="btn" onclick="clearAll()">✕ LIMPAR</button>
+        <button class="btn primary" id="btn-run" onclick="runOCR()">▶ ANALISAR COM IA</button>
+      </div>
+    </div>
+
+    <!-- Sample images strip -->
+    <div style="padding:7px 12px 0; border-bottom:1px solid var(--border); background:var(--bg1);">
+      <div style="font-size:8px;color:var(--text-dim);letter-spacing:.12em;margin-bottom:5px;">EXEMPLOS PRÉ-CARREGADOS:</div>
+      <div class="sample-grid">
+        <button class="sample-btn" onclick="loadSample('receipt')">🧾 Nota Fiscal</button>
+        <button class="sample-btn" onclick="loadSample('handwritten')">✍️ Manuscrito</button>
+        <button class="sample-btn" onclick="loadSample('code')">💻 Código-fonte</button>
+        <button class="sample-btn" onclick="loadSample('signage')">🪧 Placa / Texto</button>
+        <button class="sample-btn" onclick="loadSample('math')">∑ Fórmula Matemática</button>
+      </div>
+    </div>
+
+    <div class="drop-zone" id="drop-zone" onclick="document.getElementById('file-input').click()">
+      <div class="drop-icon">🔍</div>
+      <div class="drop-text">
+        Arraste uma imagem aqui<br>
+        ou <span onclick="event.stopPropagation(); document.getElementById('file-input').click()">clique para selecionar</span><br>
+        <span style="font-size:9px;opacity:.5;">PNG, JPG, WEBP, GIF — qualquer imagem com texto</span>
+      </div>
+      <input type="file" id="file-input" accept="image/*"/>
+
+      <div class="img-container" id="img-container">
+        <img id="preview-img" alt="Preview"/>
+        <div class="scan-line" id="scan-line"></div>
+        <canvas id="overlay-canvas"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <!-- RIGHT: Results -->
+  <div class="right-panel">
+    <div class="panel-head">
+      <span class="panel-head-title">◈ TEXTO EXTRAÍDO</span>
+      <div class="panel-head-actions">
+        <button class="btn" id="btn-copy" onclick="copyText()" style="display:none">⎘ COPIAR TUDO</button>
+      </div>
+    </div>
+
+    <div class="results-area" id="results-area">
+      <div class="result-placeholder" id="placeholder">
+        <div class="result-placeholder-icon">📄</div>
+        <div class="result-placeholder-text">
+          Nenhuma imagem carregada ainda.<br>
+          Selecione uma imagem ao lado para começar.<br>
+          <span style="font-size:9px;opacity:.4;">O modelo irá identificar e transcrever todo o texto visível.</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="full-text-label" id="full-text-label">◈ TEXTO COMPLETO CONTÍNUO:</div>
+    <div class="full-text-area" id="full-text-area"></div>
+
+    <div class="status-strip">
+      <div class="status-dot" id="status-dot"></div>
+      <div class="status-text" id="status-text">Aguardando imagem…</div>
+      <div class="stats-chips">
+        <div class="chip" id="chip-blocks">0 blocos</div>
+        <div class="chip" id="chip-chars">0 chars</div>
+        <div class="chip" id="chip-time">—</div>
+      </div>
+    </div>
+
+    <!-- Educational panel inside right column -->
+    <div class="edu-panel">
+      <div class="edu-tabs">
+        <button class="edu-tab active" onclick="setEdu(0)">🔍 O que é OCR?</button>
+        <button class="edu-tab" onclick="setEdu(1)">📸 Pixels → Texto</button>
+        <button class="edu-tab" onclick="setEdu(2)">🤖 OCR Clássico vs IA</button>
+        <button class="edu-tab" onclick="setEdu(3)">✍️ Manuscrito</button>
+        <button class="edu-tab" onclick="setEdu(4)">🌐 Aplicações Reais</button>
+      </div>
+      <div class="edu-body" id="edu-body">
+        <p><strong>OCR (Optical Character Recognition)</strong> é a tecnologia que permite a uma máquina <strong>ler texto em imagens</strong>. Ela converte pixels — pontos coloridos numa tela — em caracteres que o computador pode processar e editar.</p>
+        <p>Desde documentos escaneados até fotos de placas de rua, o OCR está por trás de <strong>tradutores de câmera, leitores de PDF, digitalizadores de notas fiscais e muito mais</strong>.</p>
+        <p>Nesta demonstração, o texto é extraído por um modelo de visão computacional (<strong>Claude</strong>), que entende o contexto da imagem inteira — não apenas padrões de pixels isolados.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════
+// STATE
+// ═══════════════════════════════════════════════════
+let currentImageBase64 = null;
+let currentImageMime = 'image/png';
+let extractedBlocks = [];
+
+// ═══════════════════════════════════════════════════
+// API KEY
+// ═══════════════════════════════════════════════════
+const apiKeyInput = document.getElementById('api-key');
+const apiStatus = document.getElementById('api-status');
+
+apiKeyInput.addEventListener('input', () => {
+  const val = apiKeyInput.value.trim();
+  if (val.startsWith('gsk_') && val.length > 20) {
+    apiStatus.className = 'api-status ok';
+    apiStatus.textContent = 'CHAVE OK ✓';
+  } else if (val.length > 0) {
+    apiStatus.className = 'api-status empty';
+    apiStatus.textContent = 'FORMATO INVÁLIDO';
+  } else {
+    apiStatus.className = 'api-status empty';
+    apiStatus.textContent = 'SEM CHAVE';
+  }
+});
+
+// ═══════════════════════════════════════════════════
+// DRAG & DROP
+// ═══════════════════════════════════════════════════
+const dropZone = document.getElementById('drop-zone');
+const fileInput = document.getElementById('file-input');
+const previewImg = document.getElementById('preview-img');
+const imgContainer = document.getElementById('img-container');
+
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault(); dropZone.classList.remove('drag-over');
+  const file = e.dataTransfer.files[0];
+  if (file && file.type.startsWith('image/')) loadFile(file);
+});
+fileInput.addEventListener('change', () => { if (fileInput.files[0]) loadFile(fileInput.files[0]); });
+
+function loadFile(file) {
+  currentImageMime = file.type || 'image/jpeg';
+  const reader = new FileReader();
+  reader.onload = e => {
+    const dataUrl = e.target.result;
+    currentImageBase64 = dataUrl.split(',')[1];
+    showPreview(dataUrl);
+  };
+  reader.readAsDataURL(file);
+}
+
+function showPreview(dataUrl) {
+  previewImg.src = dataUrl;
+  imgContainer.classList.add('active');
+  dropZone.classList.add('has-image');
+  dropZone.querySelector('.drop-icon') && (dropZone.querySelector('.drop-icon').style.display = 'none');
+  dropZone.querySelector('.drop-text') && (dropZone.querySelector('.drop-text').style.display = 'none');
+  clearResults();
+  setStatus('idle', 'Imagem carregada. Clique em ▶ ANALISAR para extrair o texto.');
+}
+
+function clearAll() {
+  currentImageBase64 = null; currentImageMime = 'image/png'; extractedBlocks = [];
+  previewImg.src = ''; imgContainer.classList.remove('active'); dropZone.classList.remove('has-image');
+  const di = dropZone.querySelector('.drop-icon'); if (di) di.style.display = '';
+  const dt = dropZone.querySelector('.drop-text'); if (dt) dt.style.display = '';
+  clearResults();
+  clearOverlay();
+  setStatus('idle', 'Aguardando imagem…');
+  document.getElementById('btn-copy').style.display = 'none';
+  document.getElementById('full-text-label').classList.remove('visible');
+  document.getElementById('full-text-area').classList.remove('visible');
+  fileInput.value = '';
+}
+
+function clearResults() {
+  document.getElementById('results-area').innerHTML = `
+    <div class="result-placeholder" id="placeholder">
+      <div class="result-placeholder-icon">📄</div>
+      <div class="result-placeholder-text">Nenhum resultado ainda.<br>Clique em ▶ ANALISAR COM IA.</div>
+    </div>`;
+  document.getElementById('chip-blocks').textContent = '0 blocos';
+  document.getElementById('chip-chars').textContent = '0 chars';
+  document.getElementById('chip-time').textContent = '—';
+}
+
+// ═══════════════════════════════════════════════════
+// SAMPLE IMAGES — drawn on canvas, converted to base64
+// ═══════════════════════════════════════════════════
+function loadSample(type) {
+  const c = document.createElement('canvas');
+  const ctx = c.getContext('2d');
+  c.width = 520; c.height = 340;
+
+  const samples = {
+    receipt: (ctx, W, H) => {
+      ctx.fillStyle = '#f5f0e8'; ctx.fillRect(0,0,W,H);
+      ctx.fillStyle = '#222'; ctx.font = 'bold 18px serif';
+      ctx.textAlign = 'center'; ctx.fillText('SUPERMERCADO BOA COMPRA', W/2, 35);
+      ctx.font = '11px monospace'; ctx.fillText('CNPJ: 12.345.678/0001-99', W/2, 55);
+      ctx.fillText('Rua das Flores, 42 - São Paulo, SP', W/2, 70);
+      ctx.strokeStyle='#999'; ctx.beginPath(); ctx.moveTo(20,80); ctx.lineTo(W-20,80); ctx.stroke();
+      ctx.textAlign='left'; ctx.font='12px monospace';
+      const items = [['Arroz 5kg Tio João','18,90'],['Feijão Preto 1kg','7,50'],['Leite Integral 1L x3','14,70'],['Café Pilão 500g','12,99'],['Açúcar Cristal 1kg','4,49']];
+      items.forEach(([name,val],i) => {
+        ctx.fillText(name, 25, 105+i*22);
+        ctx.textAlign='right'; ctx.fillText('R$ '+val, W-25, 105+i*22); ctx.textAlign='left';
+      });
+      ctx.beginPath(); ctx.moveTo(20,225); ctx.lineTo(W-20,225); ctx.stroke();
+      ctx.font='bold 14px monospace'; ctx.fillText('TOTAL:', 25, 248);
+      ctx.textAlign='right'; ctx.fillText('R$ 58,58', W-25, 248); ctx.textAlign='left';
+      ctx.font='11px monospace'; ctx.fillText('Forma de Pagamento: PIX', 25, 270);
+      ctx.fillText('Data: 10/03/2025   Hora: 14:32', 25, 288);
+      ctx.fillStyle='#555'; ctx.font='10px monospace'; ctx.textAlign='center';
+      ctx.fillText('Volte sempre! Obrigado pela preferência.', W/2, 318);
+    },
+    handwritten: (ctx, W, H) => {
+      ctx.fillStyle = '#fffde6'; ctx.fillRect(0,0,W,H);
+      for(let y=40;y<H;y+=28){ctx.strokeStyle='rgba(180,200,220,0.5)';ctx.lineWidth=.8;ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke();}
+      ctx.strokeStyle='rgba(255,100,100,0.4)';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(50,0);ctx.lineTo(50,H);ctx.stroke();
+      const notes = [
+        {x:60,y:38,text:'Anotações - Aula de Física',size:15,bold:true},
+        {x:60,y:68,text:'→ Força = massa × aceleração',size:13},
+        {x:60,y:96,text:'→ F = m · a  (Newton)',size:13},
+        {x:60,y:124,text:'→ Unidade: Newtons (N)',size:13},
+        {x:60,y:160,text:'Exemplo: carro 1000kg, a=2m/s²',size:12},
+        {x:80,y:184,text:'F = 1000 × 2 = 2000 N',size:12},
+        {x:60,y:218,text:'⚠ Lembrar para a prova:',size:13,bold:true},
+        {x:70,y:244,text:'3ª Lei: ação e reação iguais',size:12},
+        {x:70,y:268,text:'e opostas (par de forças)',size:12},
+        {x:60,y:306,text:'Prof. Silva - 03/2025',size:11},
+      ];
+      notes.forEach(n => {
+        ctx.font = `${n.bold?'bold ':''}${n.size}px "Comic Sans MS", cursive`;
+        ctx.fillStyle = '#1a1a3a'; ctx.fillText(n.text, n.x, n.y);
+      });
+    },
+    code: (ctx, W, H) => {
+      ctx.fillStyle = '#1e1e2e'; ctx.fillRect(0,0,W,H);
+      ctx.fillStyle='#313244'; ctx.fillRect(0,0,W,22);
+      ctx.fillStyle='#cdd6f4'; ctx.font='11px monospace'; ctx.fillText('  neural_net.py  —  Python 3.10', 10, 15);
+      const lines = [
+        ['import numpy as np', '#cdd6f4'],
+        ['from typing import List', '#cdd6f4'],
+        ['', ''],
+        ['def relu(x: np.ndarray) -> np.ndarray:', '#89b4fa'],
+        ['    """Rectified Linear Unit activation."""', '#6c7086'],
+        ['    return np.maximum(0, x)', '#cdd6f4'],
+        ['', ''],
+        ['class NeuralNet:', '#89b4fa'],
+        ['    def __init__(self, layers: List[int]):', '#cdd6f4'],
+        ['        self.W = []', '#cdd6f4'],
+        ['        for i, o in zip(layers, layers[1:]):', '#cdd6f4'],
+        ['            w = np.random.randn(i, o)', '#cdd6f4'],
+        ['            self.W.append(w * np.sqrt(2/i))', '#cdd6f4'],
+        ['', ''],
+        ['    def forward(self, x):', '#89b4fa'],
+        ['        for W in self.W[:-1]:', '#cdd6f4'],
+        ['            x = relu(x @ W)', '#cdd6f4'],
+        ['        return x @ self.W[-1]  # output', '#6c7086'],
+      ];
+      ctx.font = '12px "Courier New", monospace';
+      lines.forEach(([text, color], i) => {
+        if (!color) return;
+        ctx.fillStyle = '#3f4257';
+        ctx.fillText(String(i+1).padStart(3,' '), 5, 38+i*17);
+        ctx.fillStyle = color;
+        ctx.fillText(text, 38, 38+i*17);
+      });
+    },
+    signage: (ctx, W, H) => {
+      ctx.fillStyle = '#1c3a6e'; ctx.fillRect(0,0,W,H);
+      ctx.fillStyle='#ffdd00'; ctx.fillRect(0,0,W,90);
+      ctx.fillStyle='#1c3a6e'; ctx.font='bold 36px Arial';
+      ctx.textAlign='center'; ctx.fillText('ATENÇÃO', W/2, 63);
+      ctx.fillStyle='white'; ctx.font='bold 22px Arial'; ctx.fillText('ÁREA RESTRITA', W/2, 130);
+      ctx.font='14px Arial'; ctx.fillText('Acesso somente para pessoal autorizado', W/2, 170);
+      ctx.fillStyle='rgba(255,255,255,0.2)'; ctx.fillRect(20,195,W-40,1);
+      ctx.fillStyle='white'; ctx.font='13px Arial'; ctx.fillText('Portaria de Segurança nº 42/2024', W/2, 230);
+      ctx.fillStyle='#ffdd00'; ctx.font='bold 16px Arial'; ctx.fillText('⚠  Câmeras de segurança ativas 24h  ⚠', W/2, 270);
+      ctx.fillStyle='rgba(255,255,255,0.6)'; ctx.font='11px Arial'; ctx.fillText('Em caso de emergência: ramal 190', W/2, 310);
+    },
+    math: (ctx, W, H) => {
+      ctx.fillStyle = '#fefefe'; ctx.fillRect(0,0,W,H);
+      ctx.fillStyle = '#222'; ctx.font='bold 16px serif'; ctx.textAlign='center';
+      ctx.fillText('Folha de Fórmulas — Cálculo I', W/2, 35);
+      ctx.strokeStyle='#ccc'; ctx.beginPath(); ctx.moveTo(20,48); ctx.lineTo(W-20,48); ctx.stroke();
+      const formulas = [
+        {y:80,text:'∫ xⁿ dx  =  xⁿ⁺¹ / (n+1)  +  C    ,  n ≠ -1',size:15},
+        {y:116,text:'d/dx [sin x]  =  cos x',size:15},
+        {y:144,text:'d/dx [eˣ]  =  eˣ',size:15},
+        {y:180,text:'lim(x→0) sin(x)/x  =  1',size:14},
+        {y:215,text:'∫₀^∞ e^(-x²) dx  =  √π / 2',size:15},
+        {y:255,text:'Regra da Cadeia:  (f∘g)\'  =  f\'(g(x)) · g\'(x)',size:13},
+        {y:285,text:'Série de Taylor:  f(x) = Σ f⁽ⁿ⁾(a)/n! · (x-a)ⁿ',size:12},
+        {y:318,text:'Euler:  e^(iπ) + 1 = 0',size:15,bold:true},
+      ];
+      formulas.forEach(f => {
+        ctx.font = `${f.bold?'bold ':''  }${f.size}px "Times New Roman", serif`;
+        ctx.fillStyle = '#111'; ctx.textAlign='left';
+        ctx.fillText(f.text, 30, f.y);
+        ctx.strokeStyle='#e8e8e8'; ctx.lineWidth=.6;
+        ctx.beginPath(); ctx.moveTo(20,f.y+8); ctx.lineTo(W-20,f.y+8); ctx.stroke();
+      });
+    }
+  };
+
+  ctx.save();
+  (samples[type] || samples.receipt)(ctx, c.width, c.height);
+  ctx.restore();
+
+  currentImageBase64 = c.toDataURL('image/png').split(',')[1];
+  currentImageMime = 'image/png';
+  showPreview(c.toDataURL('image/png'));
+}
+
+// ═══════════════════════════════════════════════════
+// OCR — CALL CLAUDE VISION API
+// ═══════════════════════════════════════════════════
+async function runOCR() {
+  if (!currentImageBase64) { alert('Carregue uma imagem primeiro.'); return; }
+
+  const apiKey = apiKeyInput.value.trim();
+  if (!apiKey) {
+    alert('Insira sua chave de API Groq no campo no topo da tela.\nFormato: gsk_...');
+    return;
+  }
+
+  const startTime = performance.now();
+  setStatus('loading', 'Enviando imagem para análise…');
+  imgContainer.classList.add('scanning');
+
+  const prompt = `Você é um motor de OCR especializado. Analise a imagem fornecida e extraia TODO o texto visível.
+
+Responda EXCLUSIVAMENTE em JSON válido (sem markdown, sem explicação extra), neste formato:
+{
+  "blocks": [
+    {
+      "text": "texto exato extraído",
+      "type": "printed|handwritten|code|number|formula",
+      "confidence": 0.0-1.0,
+      "region": "top|middle|bottom|left|right|center",
+      "language": "pt|en|other"
+    }
+  ],
+  "full_text": "todo o texto concatenado em ordem de leitura natural",
+  "summary": "1 frase descrevendo o que é o documento/imagem"
+}
+
+Regras:
+- Inclua TODOS os textos visíveis, mesmo pequenos
+- Para texto manuscrito, estime a confiança honestamente (0.6-0.85 típico)
+- Para texto impresso claro, confiança 0.90-0.99
+- Preserve formatação original (maiúsculas, pontuação, quebras)
+- type "code" para código de programação
+- type "number" para números isolados, preços, datas
+- type "formula" para fórmulas matemáticas/científicas`;
+
+  try {
+    const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + apiKey
+      },
+      body: JSON.stringify({
+        model: 'meta-llama/llama-4-scout-17b-16e-instruct',
+        max_tokens: 2000,
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'image_url', image_url: { url: `data:${currentImageMime};base64,${currentImageBase64}` } },
+            { type: 'text', text: prompt }
+          ]
+        }]
+      })
+    });
+
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.error?.message || `HTTP ${resp.status}`);
+    }
+
+    const data = await resp.json();
+    const raw = data.choices?.[0]?.message?.content || '';
+
+    let parsed;
+    try {
+      const clean = raw.replace(/```json|```/g, '').trim();
+      parsed = JSON.parse(clean);
+    } catch {
+      // Fallback: wrap raw text as a single block
+      parsed = { blocks: [{ text: raw, type: 'printed', confidence: 0.9, region: 'center', language: 'pt' }], full_text: raw, summary: 'Texto extraído' };
+    }
+
+    imgContainer.classList.remove('scanning');
+    const elapsed = ((performance.now() - startTime) / 1000).toFixed(1);
+    renderResults(parsed, elapsed);
+
+  } catch(err) {
+    imgContainer.classList.remove('scanning');
+    setStatus('error', 'Erro: ' + err.message);
+    document.getElementById('results-area').innerHTML = `
+      <div style="padding:20px;color:#ff4466;font-size:11px;line-height:2;">
+        <div style="font-size:14px;margin-bottom:8px;">✕ Erro na análise</div>
+        <div>${escHtml(err.message)}</div>
+        <div style="margin-top:10px;color:#3a5c44;">
+          Verifique:<br>
+          • A chave de API está correta (gsk_...)<br>
+          • Você tem conexão com internet<br>
+          • Sua conta Groq tem cota disponível
+        </div>
+      </div>`;
+  }
+}
+
+// ═══════════════════════════════════════════════════
+// RENDER RESULTS
+// ═══════════════════════════════════════════════════
+function renderResults(data, elapsed) {
+  extractedBlocks = data.blocks || [];
+  const area = document.getElementById('results-area');
+  area.innerHTML = '';
+
+  if (!extractedBlocks.length) {
+    area.innerHTML = '<div style="padding:20px;color:#3a5c44;font-size:11px;">Nenhum texto detectado na imagem.</div>';
+    setStatus('done', 'Análise concluída — sem texto detectado.');
+    return;
+  }
+
+  // Summary card
+  if (data.summary) {
+    const s = document.createElement('div');
+    s.style.cssText = 'font-size:10px;color:#3a5c44;padding:6px 10px;background:var(--bg1);border:1px solid var(--border);border-radius:3px;margin-bottom:4px;letter-spacing:.05em;';
+    s.textContent = '◈ ' + data.summary;
+    s.style.animationDelay = '0s';
+    area.appendChild(s);
+  }
+
+  let totalChars = 0;
+  extractedBlocks.forEach((block, i) => {
+    const conf = block.confidence || 0.9;
+    const cls = conf >= 0.8 ? '' : conf >= 0.6 ? 'low-conf' : 'very-low';
+    const confPct = Math.round(conf * 100);
+    const barColor = conf >= 0.8 ? 'var(--green)' : conf >= 0.6 ? 'var(--amber)' : 'var(--red)';
+
+    const tag = block.type || 'printed';
+    const tagLabel = {printed:'IMPRESSO',handwritten:'MANUSCRITO',code:'CÓDIGO',number:'NÚMERO',formula:'FÓRMULA'}[tag] || tag.toUpperCase();
+
+    const div = document.createElement('div');
+    div.className = 'result-block ' + cls;
+    div.style.animationDelay = (i * 0.06) + 's';
+    div.innerHTML = `
+      <div class="result-text">${escHtml(block.text)}</div>
+      <div class="result-meta">
+        <span class="type-tag ${tag}">${tagLabel}</span>
+        <span class="conf-bar-wrap"><span class="conf-bar" style="width:${confPct}%;background:${barColor}"></span></span>
+        <span class="conf-label">Confiança: ${confPct}%</span>
+        <span class="conf-label" style="color:var(--text-dim)">${(block.region||'')}</span>
+        ${block.language && block.language !== 'pt' ? `<span class="conf-label" style="color:var(--amber)">${block.language.toUpperCase()}</span>` : ''}
+      </div>`;
+    area.appendChild(div);
+    totalChars += (block.text || '').length;
+  });
+
+  // Full text
+  if (data.full_text) {
+    document.getElementById('full-text-label').classList.add('visible');
+    document.getElementById('full-text-area').classList.add('visible');
+    document.getElementById('full-text-area').textContent = data.full_text;
+  }
+
+  document.getElementById('btn-copy').style.display = '';
+  document.getElementById('chip-blocks').className = 'chip lit';
+  document.getElementById('chip-blocks').textContent = extractedBlocks.length + ' blocos';
+  document.getElementById('chip-chars').className = 'chip lit';
+  document.getElementById('chip-chars').textContent = totalChars + ' chars';
+  document.getElementById('chip-time').className = 'chip lit';
+  document.getElementById('chip-time').textContent = elapsed + 's';
+  setStatus('done', `Análise completa — ${extractedBlocks.length} bloco(s) de texto extraído(s).`);
+}
+
+// ═══════════════════════════════════════════════════
+// OVERLAY
+// ═══════════════════════════════════════════════════
+function clearOverlay() {
+  const oc = document.getElementById('overlay-canvas');
+  const octx = oc.getContext('2d');
+  octx.clearRect(0,0,oc.width,oc.height);
+}
+
+// ═══════════════════════════════════════════════════
+// HELPERS
+// ═══════════════════════════════════════════════════
+function setStatus(state, text) {
+  const dot = document.getElementById('status-dot');
+  dot.className = 'status-dot' + (state === 'loading' ? ' active' : state === 'done' ? ' done' : state === 'error' ? ' error' : '');
+  document.getElementById('status-text').textContent = text;
+}
+
+function copyText() {
+  const ft = document.getElementById('full-text-area').textContent;
+  if (!ft) return;
+  navigator.clipboard.writeText(ft).then(() => {
+    document.getElementById('btn-copy').textContent = '✓ COPIADO!';
+    setTimeout(() => document.getElementById('btn-copy').textContent = '⎘ COPIAR TUDO', 2000);
+  });
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ═══════════════════════════════════════════════════
+// EDUCATIONAL TABS
+// ═══════════════════════════════════════════════════
+const EDU = [
+  `<p><strong>OCR (Optical Character Recognition)</strong> é a tecnologia que permite a uma máquina <strong>ler texto em imagens</strong>. Ela converte pixels em caracteres que o computador pode processar e editar.</p>
+   <p>Desde documentos escaneados até fotos de placas, o OCR está por trás de <strong>tradutores de câmera, leitores de PDF, digitalizadores de notas fiscais</strong> e muito mais.</p>
+   <p>Nesta demonstração, a extração é feita pelo <strong>Claude Vision</strong> — um modelo multimodal que entende tanto o conteúdo visual quanto o texto da imagem em conjunto.</p>`,
+
+  `<p>Uma imagem digital é uma grade de <strong>pixels</strong>, cada um com valores RGB (vermelho, verde, azul). Para o computador, texto numa foto é apenas um padrão de pixels escuros sobre um fundo claro.</p>
+   <p>O processo clássico de OCR tem etapas: <strong>1) Pré-processamento</strong> (binarização, remoção de ruído) → <strong>2) Segmentação</strong> (detectar regiões de texto) → <strong>3) Reconhecimento</strong> (classificar cada caractere) → <strong>4) Pós-processamento</strong> (correção com dicionário).</p>
+   <p>Modelos modernos como o Claude <strong>saltam essas etapas manuais</strong> e processam a imagem inteira de uma vez, com compreensão do contexto.</p>`,
+
+  `<p><strong>OCR clássico</strong> (ex: Tesseract) funciona por <strong>correspondência de padrões</strong>: compara cada região da imagem com templates de letras conhecidas. É rápido e funciona bem com texto impresso limpo.</p>
+   <p><strong>OCR com IA</strong> usa redes neurais convolucionais que <em>aprendem</em> representações de caracteres nos dados. Isso torna o reconhecimento muito mais robusto a variações de fonte, iluminação e ângulo.</p>
+   <p><strong>Modelos de visão como Claude</strong> vão além: entendem <em>contexto</em> — sabem que <code>"B4nco"</code> provavelmente é <code>"Banco"</code>, reconhecem tabelas, fórmulas e até texto manuscrito com alta acurácia.</p>`,
+
+  `<p>Texto manuscrito é o <strong>maior desafio do OCR</strong>. Cada pessoa tem uma caligrafia única, com variações de tamanho, inclinação, pressão e ligação entre letras.</p>
+   <p>Os primeiros sistemas de OCR manuscrito usavam <strong>redes neurais recorrentes (LSTM)</strong> que processam os pixels em sequência, como se lessem letra por letra da esquerda para a direita.</p>
+   <p>Modelos de visão modernos usam a arquitetura <strong>Transformer</strong> com mecanismo de atenção: o modelo pode "olhar" para várias partes da palavra ao mesmo tempo, entendendo ligações e contexto. A confiança costuma ser 60-85% — observe no painel de resultados.</p>`,
+
+  `<p>O OCR está em toda parte no mundo real:</p>
+   <p>• <strong>Nota fiscal eletrônica</strong>: governo lê NF-e por OCR para cruzar dados fiscais automaticamente.<br>
+   • <strong>Tradução por câmera</strong> (Google Translate): OCR em tempo real + tradução em milissegundos.<br>
+   • <strong>Bancos</strong>: leitura de cheques, digitalização de contratos assinados.<br>
+   • <strong>Acessibilidade</strong>: leitores de tela descrevem imagens com texto para pessoas com deficiência visual.<br>
+   • <strong>Pesquisa histórica</strong>: digitalização de manuscritos medievais e jornais do século XIX.</p>`
+];
+
+function setEdu(idx) {
+  document.querySelectorAll('.edu-tab').forEach((t,i) => t.classList.toggle('active', i===idx));
+  document.getElementById('edu-body').innerHTML = EDU[idx];
+}
+
+// init
+loadSample('receipt');
+</script>
+</body>
+</html>

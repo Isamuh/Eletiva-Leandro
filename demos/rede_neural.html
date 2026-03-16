@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Rede Neural — Demonstração ao Vivo</title>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #060a0f; overflow-x: hidden; }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: #0d1520; }
+    ::-webkit-scrollbar-thumb { background: #1e3050; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useCallback } = React;
+
+    // ═══════════════════════════════════════════════════════════════
+    // MATH HELPERS
+    // ═══════════════════════════════════════════════════════════════
+    const gaussRand = () => {
+      let u = 0, v = 0;
+      while (!u) u = Math.random();
+      while (!v) v = Math.random();
+      return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+    };
+    const softmax1D = arr => {
+      const mx = Math.max(...arr);
+      const ex = arr.map(x => Math.exp(x - mx));
+      const s = ex.reduce((a, b) => a + b, 0);
+      return ex.map(x => x / s);
+    };
+    const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+    // ═══════════════════════════════════════════════════════════════
+    // DATASET — Espiral 2 classes
+    // ═══════════════════════════════════════════════════════════════
+    function makeSpiral(n = 160) {
+      let seed = 42;
+      const rng = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
+      const rngN = () => { const u = rng() || 1e-9, v = rng(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); };
+      const X = [], y = [];
+      for (let c = 0; c < 2; c++) {
+        for (let i = 0; i < n / 2; i++) {
+          const t = i / (n / 2);
+          const angle = t * 4 * Math.PI + c * Math.PI;
+          const r = t;
+          X.push([r * Math.sin(angle) + rngN() * 0.08, r * Math.cos(angle) + rngN() * 0.08]);
+          y.push(c);
+        }
+      }
+      const mx = [0, 1].map(j => X.reduce((s, r) => s + r[j], 0) / X.length);
+      const sx = [0, 1].map(j => Math.sqrt(X.reduce((s, r) => s + (r[j] - mx[j]) ** 2, 0) / X.length) + 1e-8);
+      return { X: X.map(r => [(r[0] - mx[0]) / sx[0], (r[1] - mx[1]) / sx[1]]), y };
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // NEURAL NETWORK  2 → 16 → 8 → 2
+    // ═══════════════════════════════════════════════════════════════
+    class Net {
+      constructor() {
+        const L = [2, 16, 8, 2];
+        this.L = L; this.W = []; this.b = [];
+        for (let l = 0; l < L.length - 1; l++) {
+          const [n, m] = [L[l], L[l + 1]];
+          const sc = Math.sqrt(2 / n);
+          this.W.push(Array.from({ length: n }, () => Array.from({ length: m }, () => gaussRand() * sc)));
+          this.b.push(Array(m).fill(0));
+        }
+        this.acts = null; this.zs = null;
+      }
+
+      fwd(X) {
+        let a = X;
+        const acts = [a], zs = [];
+        for (let l = 0; l < this.W.length; l++) {
+          const W = this.W[l], b = this.b[l], last = l === this.W.length - 1;
+          const z = a.map(row => b.map((bj, j) => bj + row.reduce((s, x, k) => s + x * W[k][j], 0)));
+          zs.push(z);
+          a = last ? z.map(softmax1D) : z.map(r => r.map(x => Math.max(0, x)));
+          acts.push(a);
+        }
+        this.acts = acts; this.zs = zs;
+        return acts[acts.length - 1];
+      }
+
+      fwdInfer(X) {
+        let a = X;
+        for (let l = 0; l < this.W.length; l++) {
+          const W = this.W[l], b = this.b[l], last = l === this.W.length - 1;
+          a = a.map(row => {
+            const z = b.map((bj, j) => bj + row.reduce((s, x, k) => s + x * W[k][j], 0));
+            return last ? softmax1D(z) : z.map(x => Math.max(0, x));
+          });
+        }
+        return a;
+      }
+
+      bwd(Y) {
+        const n = Y.length, nL = this.W.length;
+        let delta = this.acts[nL].map((r, i) => r.map((v, j) => v - Y[i][j]));
+        for (let l = nL - 1; l >= 0; l--) {
+          const ap = this.acts[l], W = this.W[l];
+          const [inN, outN] = [W.length, this.b[l].length];
+          for (let i = 0; i < inN; i++)
+            for (let j = 0; j < outN; j++) {
+              let dw = 0;
+              for (let s = 0; s < n; s++) dw += ap[s][i] * delta[s][j];
+              this.W[l][i][j] -= 0.02 * clamp(dw / n, -1, 1);
+            }
+          for (let j = 0; j < outN; j++) {
+            let db = 0;
+            for (let s = 0; s < n; s++) db += delta[s][j];
+            this.b[l][j] -= 0.02 * clamp(db / n, -1, 1);
+          }
+          if (l > 0) {
+            delta = Array.from({ length: n }, (_, s) =>
+              Array.from({ length: inN }, (_, i) => {
+                let sum = 0;
+                for (let j = 0; j < outN; j++) sum += delta[s][j] * W[i][j];
+                return clamp(sum * (this.zs[l - 1][s][i] > 0 ? 1 : 0), -1, 1);
+              })
+            );
+          }
+        }
+      }
+
+      loss(preds, Y) {
+        return -Y.reduce((s, row, i) =>
+          s + row.reduce((ss, yj, j) => ss + yj * Math.log(Math.max(preds[i][j], 1e-9)), 0), 0
+        ) / Y.length;
+      }
+
+      actMeans() {
+        if (!this.acts) return null;
+        return this.acts.map(layer =>
+          layer[0] ? Array.from({ length: layer[0].length }, (_, j) =>
+            layer.reduce((s, r) => s + Math.abs(r[j]), 0) / layer.length
+          ) : []
+        );
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // CANVAS — Decision Boundary
+    // ═══════════════════════════════════════════════════════════════
+    const XMIN = -2.5, XMAX = 2.5, YMIN = -2.5, YMAX = 2.5, RES = 38;
+
+    function drawBoundary(canvas, net, data) {
+      if (!canvas || !net || !data) return;
+      const ctx = canvas.getContext("2d");
+      const cW = canvas.width, cH = canvas.height;
+      ctx.clearRect(0, 0, cW, cH);
+      const grid = [];
+      for (let gy = 0; gy < RES; gy++)
+        for (let gx = 0; gx < RES; gx++)
+          grid.push([XMIN + (gx / (RES - 1)) * (XMAX - XMIN), YMIN + (gy / (RES - 1)) * (YMAX - YMIN)]);
+      const preds = net.fwdInfer(grid);
+      const cellW = cW / RES, cellH = cH / RES;
+      for (let gy = 0; gy < RES; gy++) {
+        for (let gx = 0; gx < RES; gx++) {
+          const p = preds[gy * RES + gx];
+          const conf = Math.max(p[0], p[1]);
+          const alpha = 0.2 + (conf - 0.5) * 0.7;
+          ctx.fillStyle = p[0] > p[1] ? `rgba(0,100,180,${alpha})` : `rgba(180,50,0,${alpha})`;
+          ctx.fillRect(Math.floor(gx * cellW), Math.floor(gy * cellH), Math.ceil(cellW + 1), Math.ceil(cellH + 1));
+        }
+      }
+      ctx.strokeStyle = "rgba(30,50,80,0.4)"; ctx.lineWidth = 0.5;
+      for (let i = 0; i <= 4; i++) {
+        ctx.beginPath(); ctx.moveTo(i * cW / 4, 0); ctx.lineTo(i * cW / 4, cH); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(0, i * cH / 4); ctx.lineTo(cW, i * cH / 4); ctx.stroke();
+      }
+      const { X, y } = data;
+      X.forEach((pt, i) => {
+        const px = ((pt[0] - XMIN) / (XMAX - XMIN)) * cW;
+        const py = ((pt[1] - YMIN) / (YMAX - YMIN)) * cH;
+        ctx.shadowBlur = 6; ctx.shadowColor = y[i] === 0 ? "#00d4ff" : "#ff7020";
+        ctx.beginPath(); ctx.arc(px, py, 3.5, 0, 2 * Math.PI);
+        ctx.fillStyle = y[i] === 0 ? "#00d4ff" : "#ff7020"; ctx.fill();
+        ctx.shadowBlur = 0; ctx.strokeStyle = "rgba(255,255,255,0.25)"; ctx.lineWidth = 0.8; ctx.stroke();
+      });
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // CANVAS — Neural Network Diagram
+    // ═══════════════════════════════════════════════════════════════
+    function drawNetDiag(canvas, net, acts, pulse) {
+      if (!canvas) return;
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width, H = canvas.height;
+      ctx.clearRect(0, 0, W, H);
+      const LAYERS = [2, 16, 8, 2];
+      const nL = LAYERS.length;
+      const padX = 44, padY = 22, botPad = 32;
+      const usW = W - 2 * padX, usH = H - padY - botPad;
+      const xs = Array.from({ length: nL }, (_, i) => padX + (i / (nL - 1)) * usW);
+      const getY = (layer, i) => {
+        const n = LAYERS[layer];
+        if (n === 1) return padY + usH / 2;
+        return padY + (i / (n - 1)) * usH;
+      };
+      const layerPhase = (l) => l / (nL - 1);
+      const pulseBright = (l) => { const dist = Math.abs(pulse - layerPhase(l)) * (nL - 1); return Math.max(0, 1 - dist * 1.2); };
+
+      for (let l = 0; l < nL - 1; l++) {
+        const pb = (pulseBright(l) + pulseBright(l + 1)) / 2;
+        for (let i = 0; i < LAYERS[l]; i++) {
+          for (let j = 0; j < LAYERS[l + 1]; j++) {
+            const fx = xs[l], fy = getY(l, i), tx = xs[l + 1], ty = getY(l + 1, j);
+            const w = net && net.W[l] ? net.W[l][i][j] : 0;
+            const wm = clamp(Math.abs(w) * 0.5, 0, 1);
+            const baseA = 0.03 + wm * 0.1, pulseA = pb * 0.5;
+            ctx.beginPath(); ctx.moveTo(fx, fy); ctx.lineTo(tx, ty);
+            ctx.strokeStyle = w >= 0 ? `rgba(0,200,255,${baseA + pulseA})` : `rgba(255,100,40,${baseA + pulseA})`;
+            ctx.lineWidth = 0.4 + wm * 0.8 + pb * 1.5;
+            ctx.stroke();
+          }
+        }
+      }
+
+      if (pulse > 0) {
+        const segIdx = Math.floor(pulse * (nL - 1));
+        const segProg = (pulse * (nL - 1)) % 1;
+        if (segIdx < nL - 1) {
+          const connsToAnimate = Math.min(4, LAYERS[segIdx]);
+          for (let i = 0; i < connsToAnimate; i++) {
+            const ni = Math.floor((i / connsToAnimate) * LAYERS[segIdx]);
+            const nj = Math.floor((i / connsToAnimate) * LAYERS[segIdx + 1]);
+            const fx = xs[segIdx], fy = getY(segIdx, ni);
+            const tx = xs[segIdx + 1], ty = getY(segIdx + 1, nj);
+            const dotX = fx + (tx - fx) * segProg, dotY = fy + (ty - fy) * segProg;
+            const grad = ctx.createRadialGradient(dotX, dotY, 0, dotX, dotY, 6);
+            grad.addColorStop(0, "rgba(255,255,255,0.9)"); grad.addColorStop(1, "rgba(0,212,255,0)");
+            ctx.beginPath(); ctx.arc(dotX, dotY, 6, 0, 2 * Math.PI);
+            ctx.fillStyle = grad; ctx.fill();
+          }
+        }
+      }
+
+      const NR = 6;
+      for (let l = 0; l < nL; l++) {
+        const pb = pulseBright(l);
+        for (let i = 0; i < LAYERS[l]; i++) {
+          const x = xs[l], y = getY(l, i);
+          const act = acts && acts[l] && acts[l][i] != null ? clamp(acts[l][i] * 3, 0, 1) : 0;
+          const intensity = clamp(act + pb * 0.9, 0, 1);
+          if (intensity > 0.05) {
+            const g = ctx.createRadialGradient(x, y, 0, x, y, NR * 3.5);
+            g.addColorStop(0, `rgba(0,212,255,${intensity * 0.55})`); g.addColorStop(1, "rgba(0,212,255,0)");
+            ctx.beginPath(); ctx.arc(x, y, NR * 3.5, 0, 2 * Math.PI); ctx.fillStyle = g; ctx.fill();
+          }
+          ctx.beginPath(); ctx.arc(x, y, NR, 0, 2 * Math.PI);
+          const lv = Math.floor(15 + intensity * 160);
+          ctx.fillStyle = `rgb(${Math.floor(lv * 0.3)},${Math.floor(lv * 0.85)},${Math.floor(lv + 30)})`; ctx.fill();
+          ctx.strokeStyle = `rgba(0,212,255,${0.3 + intensity * 0.7})`; ctx.lineWidth = 1.5; ctx.stroke();
+        }
+      }
+
+      const LABELS = ["Entrada\n2", "Oculta\n16", "Oculta\n8", "Saída\n2"];
+      ctx.font = '9px "Courier New", monospace'; ctx.textAlign = "center";
+      LABELS.forEach((lbl, l) => {
+        const [top, bot] = lbl.split("\n");
+        ctx.fillStyle = "rgba(0,212,255,0.6)"; ctx.fillText(top, xs[l], H - botPad + 10);
+        ctx.fillStyle = "rgba(100,140,180,0.5)"; ctx.fillText(bot, xs[l], H - botPad + 20);
+      });
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // CANVAS — Loss Chart
+    // ═══════════════════════════════════════════════════════════════
+    function drawLossChart(canvas, lossHist) {
+      if (!canvas || lossHist.length < 2) return;
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width, H = canvas.height;
+      ctx.clearRect(0, 0, W, H);
+      const pad = { l: 38, r: 8, t: 10, b: 24 };
+      const cW = W - pad.l - pad.r, cH = H - pad.t - pad.b;
+      const maxL = Math.max(...lossHist) * 1.08;
+      for (let i = 0; i <= 4; i++) {
+        const yPos = pad.t + (i / 4) * cH;
+        ctx.strokeStyle = "rgba(30,50,80,0.7)"; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(pad.l, yPos); ctx.lineTo(W - pad.r, yPos); ctx.stroke();
+        ctx.fillStyle = "rgba(80,120,160,0.7)"; ctx.font = '9px "Courier New"'; ctx.textAlign = "right";
+        ctx.fillText((maxL * (1 - i / 4)).toFixed(2), pad.l - 4, yPos + 3);
+      }
+      ctx.beginPath();
+      lossHist.forEach((loss, i) => {
+        const x = pad.l + (i / (lossHist.length - 1)) * cW;
+        const y = pad.t + (1 - loss / maxL) * cH;
+        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      });
+      ctx.lineTo(pad.l + cW, pad.t + cH); ctx.lineTo(pad.l, pad.t + cH); ctx.closePath();
+      const fillGrad = ctx.createLinearGradient(0, pad.t, 0, pad.t + cH);
+      fillGrad.addColorStop(0, "rgba(16,185,129,0.25)"); fillGrad.addColorStop(1, "rgba(16,185,129,0)");
+      ctx.fillStyle = fillGrad; ctx.fill();
+      ctx.beginPath();
+      lossHist.forEach((loss, i) => {
+        const x = pad.l + (i / (lossHist.length - 1)) * cW;
+        const y = pad.t + (1 - loss / maxL) * cH;
+        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      });
+      ctx.strokeStyle = "#10b981"; ctx.lineWidth = 2;
+      ctx.shadowBlur = 8; ctx.shadowColor = "#10b981"; ctx.stroke(); ctx.shadowBlur = 0;
+      const lastL = lossHist[lossHist.length - 1];
+      const dotX = pad.l + cW, dotY = pad.t + (1 - lastL / maxL) * cH;
+      ctx.beginPath(); ctx.arc(dotX, dotY, 3.5, 0, 2 * Math.PI);
+      ctx.fillStyle = "#10b981"; ctx.shadowBlur = 10; ctx.shadowColor = "#10b981"; ctx.fill(); ctx.shadowBlur = 0;
+      ctx.fillStyle = "rgba(80,120,160,0.7)"; ctx.font = '9px "Courier New"'; ctx.textAlign = "center";
+      ctx.fillText("Época →", pad.l + cW / 2, H - 4);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // LESSONS
+    // ═══════════════════════════════════════════════════════════════
+    const LESSONS = [
+      {
+        icon: "🌀", title: "O Dataset Espiral", trigger: 0,
+        text: `Este dataset tem 160 pontos em forma de espiral com 2 classes (azul e laranja).
+É um problema clássico porque as classes são entrelaçadas — nenhuma linha reta consegue separá-las.
+Isso é chamado de problema não-linearmente separável.
+Redes neurais com camadas ocultas são capazes de aprender fronteiras curvas e complexas,
+ao contrário de modelos simples como a Regressão Logística.`,
+      },
+      {
+        icon: "🧠", title: "O Que é uma Rede Neural?", trigger: 200,
+        text: `Uma rede neural é inspirada no cérebro humano. Cada círculo é um neurônio que
+recebe valores de entrada, realiza uma operação matemática e passa o resultado adiante.
+Os fios representam conexões com pesos — valores numéricos que a rede aprende.
+Pesos positivos (azul) amplificam o sinal; pesos negativos (laranja) inibem.
+Quanto mais brilhante o neurônio, mais ativo ele está naquele momento do treinamento.`,
+      },
+      {
+        icon: "⚡", title: "ReLU — Função de Ativação", trigger: 800,
+        text: `Cada neurônio oculto usa a função ReLU (Rectified Linear Unit): f(x) = max(0, x).
+Simples assim! Se o valor for negativo, vira 0; se positivo, passa direto.
+Essa não-linearidade é o "truque" que permite à rede aprender padrões complexos.
+Sem ela, empilhar camadas seria o mesmo que ter uma única camada — sem ganho de expressividade.
+Você pode ver os neurônios piscando com intensidade variada, refletindo suas ativações.`,
+      },
+      {
+        icon: "📉", title: "Perda (Loss) & Cross-Entropy", trigger: 2000,
+        text: `A função de perda mede o quanto a rede erra. Usamos Cross-Entropy Loss:
+L = -Σ y·log(ŷ), onde ŷ é a probabilidade prevista.
+Quanto maior a certeza na resposta correta, menor o loss.
+Observe o gráfico: quando a curva verde cai rapidamente, a rede está aprendendo rápido.
+Quando estabiliza (plateau), ela chegou perto do máximo de acurácia para essa arquitetura.`,
+      },
+      {
+        icon: "🔄", title: "Backpropagation", trigger: 5000,
+        text: `Após cada previsão, o erro é calculado e distribuído de trás para frente pela rede
+(backpropagation = retropropagação). Cada peso recebe uma porção da "culpa" proporcional
+à sua contribuição para o erro. Usando a Regra da Cadeia do cálculo,
+o gradiente do erro chega a cada peso, que é então ajustado levemente (taxa de aprendizado = 0.02).
+Isso se repete milhares de vezes — esse processo é o Gradiente Descendente Estocástico (SGD).`,
+      },
+      {
+        icon: "🏆", title: "Convergência & Capacidade", trigger: 15000,
+        text: `Com a arquitetura 2→16→8→2, a rede tem capacidade suficiente para resolver a espiral.
+A camada de 16 neurônios detecta características simples (bordas, curvas locais);
+a de 8 neurônios combina essas características em padrões mais complexos.
+Quando a acurácia chega a ~98-100%, a rede convergiu.
+Arquiteturas maiores convergem mais rápido mas podem memorizar (overfitting).
+Menores podem não ter capacidade suficiente (underfitting).`,
+      },
+    ];
+
+    // ═══════════════════════════════════════════════════════════════
+    // MAIN COMPONENT
+    // ═══════════════════════════════════════════════════════════════
+    const SPEEDS = [8, 50, 100, 200, 500];
+
+    function App() {
+      const [running, setRunning] = useState(false);
+      const [speed, setSpeed] = useState(8);
+      const [epoch, setEpoch] = useState(0);
+      const [loss, setLoss] = useState(null);
+      const [accuracy, setAccuracy] = useState(0);
+      const [activeLesson, setActiveLesson] = useState(0);
+      const [userPickedLesson, setUserPickedLesson] = useState(false);
+
+      const boundaryRef = useRef(null);
+      const netDiagRef = useRef(null);
+      const lossRef = useRef(null);
+      const animRef = useRef(null);
+      const netRef = useRef(null);
+      const dataRef = useRef(null);
+      const st = useRef({ epoch: 0, lossHist: [], running: false, speed: 8, pulse: 0, frame: 0 });
+
+      const initAll = useCallback(() => {
+        dataRef.current = makeSpiral();
+        netRef.current = new Net();
+        st.current = { epoch: 0, lossHist: [], running: false, speed: speed, pulse: 0, frame: 0 };
+        setTimeout(() => {
+          drawBoundary(boundaryRef.current, netRef.current, dataRef.current);
+          drawNetDiag(netDiagRef.current, netRef.current, null, 0);
+          const ctx = lossRef.current?.getContext("2d");
+          if (ctx) ctx.clearRect(0, 0, lossRef.current.width, lossRef.current.height);
+        }, 60);
+      }, []);
+
+      useEffect(() => { initAll(); }, []);
+      useEffect(() => { st.current.speed = speed; }, [speed]);
+
+      const loop = useCallback(() => {
+        if (!st.current.running) return;
+        const net = netRef.current, data = dataRef.current;
+        if (!net || !data) return;
+        const { X, y } = data;
+        const Y = y.map(c => c === 0 ? [1, 0] : [0, 1]);
+        const spd = st.current.speed;
+        for (let e = 0; e < spd; e++) { net.fwd(X); net.bwd(Y); }
+        st.current.epoch += spd;
+        st.current.frame++;
+        st.current.pulse = (st.current.pulse + 0.06) % 1;
+        const preds = net.fwd(X);
+        const lv = net.loss(preds, Y);
+        const acc = preds.filter((p, i) => (p[0] > p[1] ? 0 : 1) === y[i]).length / y.length;
+        st.current.lossHist = [...st.current.lossHist.slice(-300), lv];
+        drawBoundary(boundaryRef.current, net, data);
+        drawNetDiag(netDiagRef.current, net, net.actMeans(), st.current.pulse);
+        drawLossChart(lossRef.current, st.current.lossHist);
+        if (st.current.frame % 3 === 0) {
+          setEpoch(st.current.epoch);
+          setLoss(lv);
+          setAccuracy(acc);
+          if (!userPickedLesson) {
+            const ep = st.current.epoch;
+            let li = 0;
+            LESSONS.forEach((l, i) => { if (ep >= l.trigger) li = i; });
+            setActiveLesson(li);
+          }
+        }
+        animRef.current = requestAnimationFrame(loop);
+      }, [userPickedLesson]);
+
+      useEffect(() => {
+        if (running) {
+          st.current.running = true;
+          animRef.current = requestAnimationFrame(loop);
+        } else {
+          st.current.running = false;
+          if (animRef.current) cancelAnimationFrame(animRef.current);
+        }
+        return () => { if (animRef.current) cancelAnimationFrame(animRef.current); };
+      }, [running, loop]);
+
+      const handleReset = () => {
+        setRunning(false);
+        st.current.running = false;
+        if (animRef.current) cancelAnimationFrame(animRef.current);
+        setEpoch(0); setLoss(null); setAccuracy(0);
+        setActiveLesson(0); setUserPickedLesson(false);
+        initAll();
+      };
+
+      const pct = (accuracy * 100).toFixed(1);
+      const accColor = accuracy > 0.9 ? "#10b981" : accuracy > 0.7 ? "#f59e0b" : "#ef4444";
+      const mono = '"Courier New", Courier, monospace';
+      const dark1 = "#060a0f", dark2 = "#0d1520", border = "#1e3050";
+      const cyan = "#00d4ff", green = "#10b981", amber = "#f59e0b";
+      const card = { backgroundColor: dark2, border: `1px solid ${border}`, borderRadius: 6 };
+      const lbl = { fontSize: 9, color: "#3d6080", letterSpacing: "0.12em", marginBottom: 6, fontFamily: mono };
+
+      return (
+        <div style={{ backgroundColor: dark1, minHeight: "100vh", fontFamily: mono, color: "#c8ddf0", padding: 14 }}>
+
+          {/* HEADER */}
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, paddingBottom: 10, borderBottom: `1px solid ${border}` }}>
+            <div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ fontSize: 18, color: cyan }}>⬡</span>
+                <h1 style={{ margin: 0, fontSize: 15, fontWeight: "bold", letterSpacing: "0.15em", color: cyan }}>
+                  REDE NEURAL — DEMONSTRAÇÃO AO VIVO
+                </h1>
+              </div>
+              <p style={{ margin: "3px 0 0 26px", fontSize: 10, color: "#3d6080" }}>
+                Arquitetura 2→16→8→2 · Dataset Espiral · Classificação Binária
+              </p>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 3 }}>
+                <span style={{ fontSize: 9, color: "#3d6080", marginRight: 3 }}>ÉPOCAS/FRAME</span>
+                {SPEEDS.map(s => (
+                  <button key={s} onClick={() => setSpeed(s)} style={{
+                    padding: "3px 7px", fontSize: 10, fontFamily: mono,
+                    border: `1px solid ${speed === s ? cyan : border}`,
+                    backgroundColor: speed === s ? "rgba(0,212,255,0.12)" : "transparent",
+                    color: speed === s ? cyan : "#3d6080",
+                    cursor: "pointer", borderRadius: 3,
+                  }}>{s}×</button>
+                ))}
+              </div>
+              <button onClick={() => setRunning(r => !r)} style={{
+                padding: "5px 16px", fontSize: 11, fontFamily: mono, fontWeight: "bold",
+                border: `1px solid ${running ? amber : cyan}`,
+                backgroundColor: running ? "rgba(245,158,11,0.12)" : "rgba(0,212,255,0.12)",
+                color: running ? amber : cyan, cursor: "pointer", borderRadius: 4, letterSpacing: "0.08em",
+              }}>{running ? "⏸  PAUSAR" : "▶  INICIAR"}</button>
+              <button onClick={handleReset} style={{
+                padding: "5px 14px", fontSize: 11, fontFamily: mono,
+                border: `1px solid ${border}`, backgroundColor: "transparent",
+                color: "#3d6080", cursor: "pointer", borderRadius: 4,
+              }}>↺ RESET</button>
+            </div>
+          </div>
+
+          {/* STATS BAR */}
+          <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+            {[
+              { k: "ÉPOCA", v: epoch.toLocaleString(), c: "#c8ddf0" },
+              { k: "LOSS", v: loss != null ? loss.toFixed(5) : "—", c: green },
+              { k: "ACURÁCIA", v: `${pct}%`, c: accColor },
+              { k: "ARQUITETURA", v: "2 → 16 → 8 → 2", c: "#c8ddf0" },
+              { k: "LR / CLIPE", v: "0.02 / 1.0", c: "#c8ddf0" },
+              { k: "VELOCIDADE", v: `${speed} ép/frame`, c: cyan },
+            ].map(({ k, v, c }) => (
+              <div key={k} style={{ ...card, padding: "6px 10px", flex: 1, minWidth: 0 }}>
+                <div style={lbl}>{k}</div>
+                <div style={{ fontSize: 13, color: c, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* 3-COLUMN */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 10 }}>
+            <div style={{ ...card, padding: 10 }}>
+              <div style={lbl}>◈ FRONTEIRA DE DECISÃO</div>
+              <canvas ref={boundaryRef} width={280} height={265} style={{ width: "100%", display: "block", borderRadius: 4, border: `1px solid ${border}` }} />
+              <div style={{ display: "flex", justifyContent: "center", gap: 16, marginTop: 6 }}>
+                <span style={{ fontSize: 10, color: "#3d8080" }}>● Classe 0 (azul)</span>
+                <span style={{ fontSize: 10, color: "#80402a" }}>● Classe 1 (laranja)</span>
+              </div>
+            </div>
+            <div style={{ ...card, padding: 10 }}>
+              <div style={lbl}>◈ DIAGRAMA DA REDE NEURAL</div>
+              <canvas ref={netDiagRef} width={280} height={265} style={{ width: "100%", display: "block", borderRadius: 4, border: `1px solid ${border}` }} />
+              <div style={{ display: "flex", justifyContent: "center", gap: 16, marginTop: 6 }}>
+                <span style={{ fontSize: 10, color: "#3d8080" }}>— Peso positivo</span>
+                <span style={{ fontSize: 10, color: "#80402a" }}>— Peso negativo</span>
+              </div>
+            </div>
+            <div style={{ ...card, padding: 10 }}>
+              <div style={lbl}>◈ CURVA DE PERDA (LOSS)</div>
+              <canvas ref={lossRef} width={280} height={265} style={{ width: "100%", display: "block", borderRadius: 4, border: `1px solid ${border}` }} />
+              <div style={{ display: "flex", justifyContent: "center", gap: 16, marginTop: 6 }}>
+                <span style={{ fontSize: 10, color: "#10b981" }}>— Cross-Entropy Loss</span>
+              </div>
+            </div>
+          </div>
+
+          {/* EDUCATIONAL PANEL */}
+          <div style={{ ...card, padding: 12 }}>
+            <div style={{ ...lbl, marginBottom: 8 }}>◈ GUIA DIDÁTICO — CLIQUE PARA EXPLORAR:</div>
+            <div style={{ display: "flex", gap: 5, marginBottom: 10, flexWrap: "wrap" }}>
+              {LESSONS.map((l, i) => (
+                <button key={i} onClick={() => { setActiveLesson(i); setUserPickedLesson(true); }} style={{
+                  padding: "4px 10px", fontSize: 10, fontFamily: mono,
+                  border: `1px solid ${activeLesson === i ? cyan : border}`,
+                  backgroundColor: activeLesson === i ? "rgba(0,212,255,0.1)" : "transparent",
+                  color: activeLesson === i ? cyan : "#3d6080",
+                  cursor: "pointer", borderRadius: 3,
+                }}>{l.icon} {l.title}</button>
+              ))}
+            </div>
+            <div style={{ backgroundColor: dark1, borderLeft: `3px solid ${cyan}`, borderRadius: 4, padding: "12px 16px", border: `1px solid ${border}`, borderLeftColor: cyan }}>
+              <div style={{ fontSize: 13, fontWeight: "bold", color: cyan, marginBottom: 7, letterSpacing: "0.05em" }}>
+                {LESSONS[activeLesson].icon} {LESSONS[activeLesson].title}
+              </div>
+              {LESSONS[activeLesson].text.split("\n").map((line, i) => (
+                <p key={i} style={{ margin: "0 0 5px", fontSize: 12, color: "#7aafcf", lineHeight: 1.7 }}>{line.trim()}</p>
+              ))}
+              {!userPickedLesson && (
+                <div style={{ marginTop: 8, fontSize: 10, color: "#2a4a60", fontStyle: "italic" }}>
+                  ↳ Tópico avança automaticamente com o treinamento
+                </div>
+              )}
+            </div>
+          </div>
+
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById("root"));
+    root.render(<App />);
+  </script>
+</body>
+</html>
